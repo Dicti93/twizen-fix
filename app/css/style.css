@@ -74,6 +74,8 @@ img { display: block; }
 .pill { position: absolute; font-size: 0.7rem; font-weight: 700; padding: 0.08rem 0.35rem; border-radius: 0.2rem; }
 .pill.live { left: 0.5rem; top: 0.5rem; background: #eb0400; color: #fff; text-transform: uppercase; }
 .pill.viewers { left: 0.5rem; bottom: 0.5rem; background: rgba(0, 0, 0, 0.75); }
+/* Live viewer count in the same red as in the player. */
+.pill.count { color: #ff8280; }
 .pill.dur { right: 0.5rem; bottom: 0.5rem; background: rgba(0, 0, 0, 0.75); }
 .card-info { display: flex; padding-top: 0.6rem; }
 .card-info .av { width: 2.4rem; height: 2.4rem; margin-right: 0.6rem; }
@@ -140,6 +142,11 @@ img { display: block; }
 .chan-status { font-size: 1rem; color: #adadb8; }
 .chan-status b { color: #ff8280; }
 .chan-title { color: #efeff1; margin-top: 0.2rem; }
+
+/* zapping: stream next to the sidebar */
+body.zap #player { left: 15rem; }
+.fol.playing { box-shadow: inset 0.2rem 0 0 #9147ff; }
+.fol.playing .fol-name { color: #bf94ff; }
 
 /* Live-Kanäle filters */
 .filters { flex-wrap: wrap; margin-bottom: 0.6rem; }

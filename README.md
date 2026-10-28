@@ -12,8 +12,9 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
     den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien)
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
     neu gestartet), die Auswahl bleibt gespeichert; 100 Kategorien mit Clips der Woche
-  - TV-Programm: geplante Streams deiner Kanäle als Wochenübersicht
-  - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch)
+  - TV-Programm: geplante Streams der Kanäle, denen du folgst, als Wochenübersicht
+  - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch);
+    ein Kanal aus der Leiste läuft neben ihr, mit ▲/▼ und OK wird durchgezappt
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
   Qualität umschaltbar, geringe Verzögerung, Chat mit Abzeichen und Emotes von 7TV, BTTV und FFZ,
@@ -28,7 +29,7 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 ## Installation
 
 1. [TizenBrew](https://github.com/reisxd/TizenBrew) auf dem Fernseher installieren.
-2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.5.1` eingeben.
+2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.5.2` eingeben.
 3. **Twizen DE** starten.
 
 Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen.
@@ -38,7 +39,7 @@ Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen
 | Taste | Übersicht | Player |
 | --- | --- | --- |
 | OK | Öffnen | Steuerleiste zeigen / Knopf drücken |
-| Zurück | Ins Menü, dann beenden | Steuerleiste ausblenden, dann schließen |
+| Zurück | Ins Menü, dann beenden | Seitenleiste einklappen, Steuerleiste ausblenden, dann schließen |
 | Gelb | Kanalseite der Kachel | Kanalseite |
 | Rot | | Chat: Seite / überlagert / aus |
 | Grün | | Lautstärke-Ausgleich |

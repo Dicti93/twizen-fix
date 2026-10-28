@@ -1,9 +1,9 @@
-/* Twizen 0.5.1 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.5.2 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.1';
+TT.VERSION = '0.5.2';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -405,8 +405,9 @@ TT.checkService = function () {
     },
 
     // Live channels for the "Live-Kanäle" page. f: { lang, sort, game }. Returns a pager whose
-    // next() resolves { items, done }. Signed in + "most viewers" pages endlessly via Helix;
-    // a category gives up to 100; otherwise GQL pages of 30 (only signed in; anonymous GQL refuses page 2).
+    // next() resolves { items, done }. A category gives up to 100; otherwise GQL pages of 30
+    // (only signed in; anonymous GQL refuses page 2). GQL, not Helix, because only GQL has the
+    // content classification labels the 18+ filter needs.
     livePager: function (f) {
       var cursor = null, done = false, first = true;
       var langs = f.lang === 'all' ? null : f.lang;
@@ -424,13 +425,6 @@ TT.checkService = function () {
             return gql('query($n:String!){ game(name:$n){ streams(first:100, options:{sort:' + f.sort +
               (langs ? ', languages:["' + langs.toUpperCase() + '"]' : '') + '}){ edges{ node{ ' + STREAM_FIELDS + ' } } } } }',
               { n: f.game.name }).then(function (d) { return { items: d.game ? edgesToNodes(d.game.streams) : [], done: true }; });
-          }
-          if (f.sort === 'VIEWER_COUNT' && auth.current()) {
-            return helix('streams?first=100' + (langs ? '&language=' + langs : '') + (cursor ? '&after=' + encodeURIComponent(cursor) : ''))
-              .then(function (d) {
-                var next = d.pagination && d.pagination.cursor;
-                return helixStreams(d.data || []).then(function (items) { return finish(items, next); });
-              });
           }
           var opt = 'sort:' + f.sort + (langs ? ', languages:[' + langs.toUpperCase() + ']' : '');
           return gql('query{ streams(first:30' + (cursor ? ', after:' + JSON.stringify(cursor) : '') + ', options:{' + opt + '}){ ' +
@@ -2873,6 +2867,8 @@ TT.checkService = function () {
       setStatus('');
     },
 
+    currentLogin: function () { return current && current.stream ? current.stream.broadcaster.login : null; },
+
     // Set by the views: opens a channel page from the player's "Channel" button.
     onChannelPage: null,
     // Set by the views: the followed list changed (follow / unfollow).
@@ -3140,7 +3136,13 @@ TT.checkService = function () {
     var prev = top();
     prev.el.style.display = '';
     highlightSide();
-    if (prev.lastFocus && prev.el.contains(prev.lastFocus)) TT.focus.set(prev.lastFocus);
+    if (t.player) { setZap(false); markPlaying(null); }
+    var lf = prev.lastFocus;
+    // The sidebar may have been re-rendered meanwhile: find the same channel again.
+    if (lf && !document.body.contains(lf) && lf.getAttribute && lf.getAttribute('data-login')) {
+      lf = document.querySelector('#sidebar [data-login="' + lf.getAttribute('data-login') + '"]');
+    }
+    if (lf && document.body.contains(lf)) TT.focus.set(lf);
     else focusFirstIn(prev.el);
     return true;
   }
@@ -3235,7 +3237,7 @@ TT.checkService = function () {
     lazySrc(img, s.previewImageURL ? s.previewImageURL + '?t=' + Math.floor(Date.now() / 300000) : '');
     thumb.appendChild(img);
     thumb.appendChild(TT.el('span', 'pill live', 'Live'));
-    thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtViewers(s.viewersCount)));
+    thumb.appendChild(TT.el('span', 'pill viewers count', TT.fmtViewers(s.viewersCount)));
     lift.appendChild(thumb);
     card.appendChild(lift);
     var info = TT.el('div', 'card-info');
@@ -3330,7 +3332,8 @@ TT.checkService = function () {
     card.appendChild(ring);
     card.appendChild(TT.el('div', 'card-title', c.displayName || c.login));
     card.appendChild(TT.el('div', 'card-sub' + (c.stream ? ' live-text' : ''),
-      c.stream ? 'Live · ' + (c.stream.game ? c.stream.game.displayName : TT.fmtViewers(c.stream.viewersCount)) : 'Offline'));
+      c.stream ? 'Live · ' + TT.fmtViewers(c.stream.viewersCount) : 'Offline'));
+    if (c.stream && c.stream.game) card.appendChild(TT.el('div', 'card-sub', c.stream.game.displayName));
     return TT.focusable(card, function () {
       if (playIfLive && c.stream) openPlayer(c.stream, [c.stream]); else views.channel(c.login);
     });
@@ -3344,7 +3347,7 @@ TT.checkService = function () {
     img.src = (s.previewImageURL || '').replace('356x200', '712x400') + '?t=' + Math.floor(Date.now() / 300000);
     thumb.appendChild(img);
     thumb.appendChild(TT.el('span', 'pill live', 'Live'));
-    thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtViewers(s.viewersCount)));
+    thumb.appendChild(TT.el('span', 'pill viewers count', TT.fmtViewers(s.viewersCount)));
     card.appendChild(thumb);
     var body = TT.el('div', 'hero-body');
     body.appendChild(TT.el('div', 'hero-kicker', 'Empfohlen für dich'));
@@ -3501,9 +3504,26 @@ TT.checkService = function () {
     stack[stack.length - 2].lastFocus = TT.focus.get();
   }
 
-  function openPlayer(stream, list) {
+  // Zapping: a stream opened from the sidebar plays next to it; ▲▼ + OK switch channels,
+  // → or Back folds the sidebar away (then it's the normal full-screen player).
+  var zap = false;
+  function setZap(on) {
+    zap = on;
+    document.body.className = document.body.className.replace(/\bzap\b/g, '').trim() + (on ? ' zap' : '');
+  }
+
+  function markPlaying(login) {
+    [].forEach.call(document.querySelectorAll('#sidebar .fol'), function (e) {
+      e.classList.toggle('playing', e.getAttribute('data-login') === login);
+    });
+  }
+
+  function openPlayer(stream, list, fromSidebar) {
+    var from = TT.focus.get();
     showPlayer();
+    setZap(!!fromSidebar);
     TT.player.open(stream, list);
+    if (fromSidebar) { markPlaying(stream.broadcaster.login); TT.focus.set(from); }
   }
 
   function openVodPlayer(vod, owner) {
@@ -3514,6 +3534,7 @@ TT.checkService = function () {
   // ---- sidebar: followed channels ---------------------------------------------
   function followEntry(c, live, list) {
     var item = TT.el('div', 'fol' + (live ? '' : ' off'));
+    item.setAttribute('data-login', c.login);
     item.appendChild(avatar(c.profileImageURL));
     var t = TT.el('div', 'fol-text');
     t.appendChild(TT.el('div', 'fol-name', c.displayName || c.login));
@@ -3521,8 +3542,23 @@ TT.checkService = function () {
     item.appendChild(t);
     if (live) item.appendChild(TT.el('div', 'fol-viewers', TT.fmtCount(live.viewersCount)));
     return TT.focusable(item, function () {
-      if (live) openPlayer(live, list); else views.channel(c.login);
+      if (live && zap && top() && top().player) {
+        TT.player.open(live, list);
+        markPlaying(c.login);
+        stack[stack.length - 2].lastFocus = item; // closing the player returns here
+        return;
+      }
+      if (live) { openPlayer(live, list, true); return; }
+      if (top() && top().player) pop();
+      views.channel(c.login);
     });
+  }
+
+  // Focus the entry of `login` in a re-rendered sidebar list (else its first entry).
+  function refocus(box, login) {
+    var el = login && box.querySelector('[data-login="' + login + '"]');
+    if (el) TT.focus.set(el); else focusFirstIn(box);
+    if (zap) markPlaying(TT.player.currentLogin());
   }
 
   // Favourites at the top of the sidebar (live first). With favourites set, only they get
@@ -3533,6 +3569,7 @@ TT.checkService = function () {
     favHead.style.display = favs.length ? '' : 'none';
     if (!favs.length) { TT.clear(favBox); prevFavLive = null; return Promise.resolve({}); }
     var had = favBox.contains(TT.focus.get());
+    var focusedLogin = had ? TT.focus.get().getAttribute('data-login') : null;
     return TT.api.usersByLogin(favs).then(function (users) {
       var live = users.filter(function (u) { return u.stream; })
         .sort(function (a, b) { return b.stream.viewersCount - a.stream.viewersCount; });
@@ -3543,7 +3580,7 @@ TT.checkService = function () {
       TT.clear(favBox);
       live.forEach(function (u) { favBox.appendChild(followEntry(u, u.stream, liveStreams)); });
       off.forEach(function (u) { favBox.appendChild(followEntry(u, null)); });
-      if (had) focusFirstIn(favBox);
+      if (had) refocus(favBox, focusedLogin);
       if (prevFavLive) {
         var fresh = live.filter(function (u) { return !prevFavLive[u.login]; }).map(function (u) { return u.displayName || u.login; });
         if (fresh.length) TT.toast('★ ' + fresh.join(', ') + (fresh.length > 1 ? ' sind' : ' ist') + ' jetzt live', 6000);
@@ -3561,6 +3598,7 @@ TT.checkService = function () {
     followTimer = setTimeout(refreshFollows, 180000);
     refreshFavorites();
     var hadFocus = followBox.contains(TT.focus.get());
+    var focusedLogin = hadFocus ? TT.focus.get().getAttribute('data-login') : null;
     if (!TT.api.auth.current()) {
       TT.clear(followBox);
       var hint = TT.el('div', 'fol-login', 'Melde dich an, um deine Kanäle hier zu sehen');
@@ -3587,7 +3625,7 @@ TT.checkService = function () {
       } else if (!live.length && !offline.length) {
         followBox.appendChild(TT.el('div', 'fol-login', 'Keine gefolgten Kanäle'));
       }
-      if (hadFocus) focusFirstIn(followBox);
+      if (hadFocus) refocus(followBox, focusedLogin);
       // "X ist jetzt live" for channels that went live since the last check (not on start-up).
       if (prevLive && !TT.favorites.list().length) {
         var fresh = live.filter(function (s) { return !prevLive[s.broadcaster.login]; })
@@ -3610,11 +3648,12 @@ TT.checkService = function () {
     // available to apps like this one, not even signed in.)
     function fill(box, lang) {
       var had = box.contains(TT.focus.get());
+      var login = had ? TT.focus.get().getAttribute('data-login') : null;
       return TT.api.topStreams(lang).then(function (top) {
         var list = top.filter(function (s) { return !skip[s.broadcaster.login]; }).slice(0, 10);
         TT.clear(box);
         list.forEach(function (s) { box.appendChild(followEntry(s.broadcaster, s, list)); });
-        if (had) focusFirstIn(box);
+        if (had) refocus(box, login);
         TT.lazy();
       }).catch(function () { /* keep the old list */ });
     }
@@ -3770,7 +3809,7 @@ TT.checkService = function () {
 
       var gen = 0;
       function reload() {
-        var my = ++gen, pager = TT.api.livePager(f), loading = false, done = false, seen = {}, all = [];
+        var my = ++gen, pager = TT.api.livePager(f), loading = false, done = false, seen = {}, all = [], checked = 0;
         var g = grid([]);
         TT.clear(body);
         body.appendChild(g);
@@ -3805,11 +3844,17 @@ TT.checkService = function () {
                 g.appendChild(card);
               });
               TT.lazy();
-              if (!done && found < 24 && pages < 15) return step();
+              // Strict filters can skip many pages: search further while nothing matched yet,
+              // and say how far the search got.
+              checked += r.items.length;
+              if (!done && found < 24 && pages < (all.length ? 15 : 60)) {
+                if (!all.length) note.textContent = 'Suche passende Kanäle … (' + checked + ' geprüft)';
+                return step();
+              }
               loading = false;
               note.textContent = all.length ? all.length + ' Kanäle' + (done ? '' : ' (weitere laden beim Runterscrollen)') +
                 (done && !TT.api.auth.current() && !f.game ? ' · Ohne Anmeldung zeigt Twitch höchstens 30' : '') :
-                'Keine Kanäle für diese Auswahl';
+                (done ? 'Keine Kanäle für diese Auswahl' : 'Unter den ersten ' + checked + ' Kanälen passt keiner zu dieser Auswahl');
             }, function (e) {
               if (my !== gen) return;
               loading = false;
@@ -3830,10 +3875,9 @@ TT.checkService = function () {
       var signedIn = !!TT.api.auth.current();
       var chanP = signedIn ? TT.api.followedChannels().then(function (l) { return l.map(function (c) { return c.login; }); })
         .catch(function () { return []; }) : Promise.resolve([]);
-      var data = Promise.all([chanP]).then(function (r) {
-        var all = TT.favorites.list().concat(r[0], TT.recent.list().map(function (c) { return c.login; }));
-        return TT.api.schedules(all.filter(function (l, i) { return all.indexOf(l) === i; }));
-      }).then(function (chans) { return chans.filter(function (c) { return c.segments.length; }); });
+      // Only channels you follow.
+      var data = chanP.then(function (logins) { return TT.api.schedules(logins); })
+        .then(function (chans) { return chans.filter(function (c) { return c.segments.length; }); });
       load(el, data, function (chans) {
         var days = TT.el('div', 'toolbar days');
         var gridBox = TT.el('div', 'epg');
@@ -3857,7 +3901,8 @@ TT.checkService = function () {
         }
         showDay(0);
         return first;
-      }, 'Keiner deiner Kanäle hat einen Zeitplan. Folge Kanälen oder markiere Favoriten.');
+      }, signedIn ? 'Keiner der Kanäle, denen du folgst, hat einen Zeitplan.'
+        : 'Melde dich unter Einstellungen → Twitch-Konto an, dann erscheinen hier die Zeitpläne deiner Kanäle.');
     },
 
     // pick(g): choose a category for a filter instead of opening it (g = null: all categories).
@@ -4196,7 +4241,8 @@ TT.checkService = function () {
       };
       TT.focus.setScope(function () {
         var t = top();
-        return t && t.player ? t.el : [side, t ? t.el : null];
+        if (t && t.player) return zap ? [side] : t.el;
+        return [side, t ? t.el : null];
       });
       views.home();
     },
@@ -4210,6 +4256,15 @@ TT.checkService = function () {
       return false;
     },
     inPlayer: function () { var t = top(); return !!(t && t.player); },
+    // Keys while zapping with the sidebar open; returns true if handled.
+    zapKey: function (k) {
+      if (!zap || !TT.nav.inPlayer()) return false;
+      if (k === 'up' || k === 'down') { TT.focus.move(k); return true; }
+      if (k === 'enter') { TT.focus.activate(); return true; }
+      if (k === 'right' || k === 'back') { setZap(false); TT.toast('Seitenleiste eingeklappt · Zurück schließt den Stream', 2500); return true; }
+      if (k === 'left') return true;
+      return false;
+    },
     current: top
   };
 })();
@@ -4257,6 +4312,7 @@ TT.checkService = function () {
     if (!k) return;
     e.preventDefault();
 
+    if (inPlayer && TT.nav.zapKey(k)) return;
     if (inPlayer && TT.player.key(k, !!e.repeat)) return;
     if (k === 'back' || k === 'stop') {
       if (TT.nav.back()) return;

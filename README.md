@@ -4,6 +4,9 @@
 > with a 1440p source.
 > fix2: keep `#EXT-X-MAP` (fMP4 init segment) when the ad blocker rewrites media playlists,
 > and show diagnostics on screen if nothing plays after 15 s.
+> fix5: repackage fMP4 segments (Enhanced Broadcasting) as MPEG-TS before hls.js sees them
+> (`app/js` section `fmp4ts.js`). Tizen 3.0 TVs can't decode Twitch's muxed fMP4 with 1 MHz
+> 64-bit timestamps, but play the same H.264/AAC fine as TS.
 
 # Twizen
 

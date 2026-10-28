@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.3.3-fix4';
+TT.VERSION = '0.3.3-fix5';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -598,7 +598,19 @@ TT.checkService = function () {
     this.keys = [];
     this.maxSn = null;
     this.lastText = null;
+    this.mapByUri = {};
+    this.mapKeys = [];
   }
+
+  // seg URI -> init segment URI (from an #EXT-X-MAP line).
+  Normalizer.prototype.rememberMap = function (uri, mapLine) {
+    if (this.mapByUri[uri]) return;
+    var m = /URI="([^"]*)"/.exec(mapLine);
+    if (!m) return;
+    this.mapByUri[uri] = m[1];
+    this.mapKeys.push(uri);
+    if (this.mapKeys.length > 300) delete this.mapByUri[this.mapKeys.shift()];
+  };
 
   Normalizer.prototype.key = function (seg) {
     if (seg.pdt) {
@@ -634,13 +646,12 @@ TT.checkService = function () {
 
     var target = parsed.targetDuration;
     for (i = start; i < segs.length; i++) target = Math.max(target, Math.ceil(segs[i].duration));
-    var hasMap = false;
-    for (i = start; i < segs.length; i++) if (segs[i].map) hasMap = true;
-    var out = ['#EXTM3U', '#EXT-X-VERSION:' + (hasMap ? 6 : 3), '#EXT-X-TARGETDURATION:' + target,
+    var out = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:' + target,
       '#EXT-X-MEDIA-SEQUENCE:' + sns[start]];
-    var lastMap = null;
     for (i = start; i < segs.length; i++) {
-      if (segs[i].map && segs[i].map !== lastMap) { out.push(segs[i].map); lastMap = segs[i].map; }
+      // fMP4 segments are repackaged as TS by the fragment loader (fmp4ts.js), so the
+      // playlist must not announce an init segment; remember it for the loader instead.
+      if (segs[i].map) this.rememberMap(segs[i].uri, segs[i].map);
       if (segs[i].pdt) out.push('#EXT-X-PROGRAM-DATE-TIME:' + segs[i].pdt);
       out.push('#EXTINF:' + segs[i].duration.toFixed(3) + ',live');
       out.push(segs[i].uri);
@@ -665,6 +676,11 @@ TT.checkService = function () {
     this.adHow = null;
     this.blockedCount = 0;
   }
+
+  // Init segment URI for an fMP4 segment URL, or null for TS segments.
+  AdController.prototype.mapFor = function (url) {
+    return this.normalizer.mapByUri[url] || null;
+  };
 
   AdController.prototype.processMaster = function (url, text) {
     var variants = parseMaster(text);
@@ -1118,6 +1134,433 @@ TT.checkService = function () {
   };
 })();
 
+/* ---- fmp4ts.js ---- */
+;// Repackages Twitch fMP4 segments (Enhanced Broadcasting) as MPEG-TS.
+//
+// Older Tizen TVs (Tizen 3.0) can't play these fMP4 segments: audio and video are muxed in
+// one track pair with 1 MHz, 64-bit video timestamps, and both MSE and the TV's own player
+// fail with a decode error. Classic Twitch TS streams play fine, so we rewrite each fMP4
+// segment into TS (same H.264/AAC data, new container) and hls.js handles it like any TS
+// stream: separate audio/video buffers, 90 kHz timestamps.
+(function (root) {
+  function u32(d, p) { return ((d[p] << 24) >>> 0) + (d[p + 1] << 16) + (d[p + 2] << 8) + d[p + 3]; }
+  function u64(d, p) { return u32(d, p) * 4294967296 + u32(d, p + 4); }
+  function s32(d, p) { return (d[p] << 24) | (d[p + 1] << 16) | (d[p + 2] << 8) | d[p + 3]; }
+  function type(d, p) { return String.fromCharCode(d[p], d[p + 1], d[p + 2], d[p + 3]); }
+
+  // Calls fn(type, start, bodyStart, end) for each box in [off, end).
+  function eachBox(d, off, end, fn) {
+    while (off + 8 <= end) {
+      var size = u32(d, off), hdr = 8;
+      if (size === 1) { size = u64(d, off + 8); hdr = 16; } else if (size === 0) { size = end - off; }
+      if (size < hdr || off + size > end) return;
+      fn(type(d, off + 4), off, off + hdr, off + size);
+      off += size;
+    }
+  }
+
+  function child(d, start, end, name) {
+    var found = null;
+    eachBox(d, start, end, function (t, s, b, e) { if (!found && t === name) found = { start: s, body: b, end: e }; });
+    return found;
+  }
+
+  function isFmp4(d) {
+    var hit = false;
+    eachBox(d, 0, Math.min(d.length, 1 << 20), function (t) { if (t === 'moof' || t === 'moov') hit = true; });
+    return hit;
+  }
+
+  // ---- init segment ---------------------------------------------------------------
+  function parseInit(d) {
+    var tracks = {};
+    var moov = child(d, 0, d.length, 'moov');
+    if (!moov) return null;
+    eachBox(d, moov.body, moov.end, function (t, s, b, e) {
+      if (t === 'mvex') {
+        eachBox(d, b, e, function (t2, s2, b2) {
+          if (t2 !== 'trex') return;
+          var id = u32(d, b2 + 4);
+          tracks[id] = tracks[id] || {};
+          tracks[id].defDur = u32(d, b2 + 12);
+          tracks[id].defSize = u32(d, b2 + 16);
+          tracks[id].defFlags = u32(d, b2 + 20);
+        });
+        return;
+      }
+      if (t !== 'trak') return;
+      var tkhd = child(d, b, e, 'tkhd');
+      var id = u32(d, tkhd.body + (d[tkhd.body] === 1 ? 20 : 12));
+      var tr = tracks[id] = tracks[id] || {};
+      var mdia = child(d, b, e, 'mdia');
+      var mdhd = child(d, mdia.body, mdia.end, 'mdhd');
+      tr.timescale = u32(d, mdhd.body + (d[mdhd.body] === 1 ? 20 : 12));
+      var hdlr = child(d, mdia.body, mdia.end, 'hdlr');
+      var handler = type(d, hdlr.body + 8);
+      var minf = child(d, mdia.body, mdia.end, 'minf');
+      var stbl = child(d, minf.body, minf.end, 'stbl');
+      var stsd = child(d, stbl.body, stbl.end, 'stsd');
+      eachBox(d, stsd.body + 8, stsd.end, function (et, es, eb, ee) {
+        if (handler === 'vide' && (et === 'avc1' || et === 'avc3')) {
+          var avcC = child(d, eb + 78, ee, 'avcC');
+          if (!avcC) return;
+          var p = avcC.body;
+          tr.kind = 'video';
+          tr.nalLen = (d[p + 4] & 3) + 1;
+          tr.sps = []; tr.pps = [];
+          var n = d[p + 5] & 31, q = p + 6, i, len;
+          for (i = 0; i < n; i++) { len = (d[q] << 8) | d[q + 1]; tr.sps.push(d.subarray(q + 2, q + 2 + len)); q += 2 + len; }
+          n = d[q]; q++;
+          for (i = 0; i < n; i++) { len = (d[q] << 8) | d[q + 1]; tr.pps.push(d.subarray(q + 2, q + 2 + len)); q += 2 + len; }
+        } else if (handler === 'soun' && et === 'mp4a') {
+          var esds = child(d, eb + 28, ee, 'esds');
+          if (!esds) return;
+          var asc = findAsc(d, esds.body + 4, esds.end);
+          if (!asc) return;
+          tr.kind = 'audio';
+          tr.aot = asc[0] >> 3;
+          tr.freqIdx = ((asc[0] & 7) << 1) | (asc[1] >> 7);
+          tr.channels = (asc[1] >> 3) & 15;
+        }
+      });
+    });
+    return tracks;
+  }
+
+  // Walks the esds descriptors to the DecoderSpecificInfo (AudioSpecificConfig).
+  function findAsc(d, p, end) {
+    function readLen() { var len = 0, b; do { b = d[p++]; len = (len << 7) | (b & 0x7f); } while (b & 0x80 && p < end); return len; }
+    while (p < end) {
+      var tag = d[p++], len = readLen();
+      if (tag === 0x03) { var flags = d[p + 2]; p += 3; if (flags & 0x80) p += 2; if (flags & 0x40) p += 1 + d[p]; if (flags & 0x20) p += 2; continue; }
+      if (tag === 0x04) { p += 13; continue; }
+      if (tag === 0x05) return d.subarray(p, p + len);
+      p += len;
+    }
+    return null;
+  }
+
+  // ---- media segment --------------------------------------------------------------
+  // Returns [{ id, samples: [{ dts, cts, data, flags }] }] in decode order per track.
+  function parseSegment(d, tracks) {
+    var out = {};
+    eachBox(d, 0, d.length, function (t, moofStart, b, e) {
+      if (t !== 'moof') return;
+      eachBox(d, b, e, function (t2, s2, tb, te) {
+        if (t2 !== 'traf') return;
+        var tfhd = child(d, tb, te, 'tfhd');
+        var tf = u32(d, tfhd.body) & 0xffffff;
+        var id = u32(d, tfhd.body + 4), p = tfhd.body + 8;
+        var tr = tracks[id];
+        if (!tr) return;
+        var base = moofStart, defDur = tr.defDur, defSize = tr.defSize, defFlags = tr.defFlags;
+        if (tf & 0x1) { base = u64(d, p); p += 8; }
+        if (tf & 0x2) p += 4;
+        if (tf & 0x8) { defDur = u32(d, p); p += 4; }
+        if (tf & 0x10) { defSize = u32(d, p); p += 4; }
+        if (tf & 0x20) { defFlags = u32(d, p); p += 4; }
+        var tfdt = child(d, tb, te, 'tfdt');
+        var dts = tfdt ? (d[tfdt.body] === 1 ? u64(d, tfdt.body + 4) : u32(d, tfdt.body + 4)) : 0;
+        var list = out[id] = out[id] || [];
+        eachBox(d, tb, te, function (t3, s3, rb) {
+          if (t3 !== 'trun') return;
+          var v = d[rb], f = u32(d, rb) & 0xffffff, n = u32(d, rb + 4), q = rb + 8;
+          var pos = base;
+          if (f & 0x1) { pos = base + s32(d, q); q += 4; }
+          var firstFlags = null;
+          if (f & 0x4) { firstFlags = u32(d, q); q += 4; }
+          for (var i = 0; i < n; i++) {
+            var dur = defDur, size = defSize, flags = (i === 0 && firstFlags !== null) ? firstFlags : defFlags, cts = 0;
+            if (f & 0x100) { dur = u32(d, q); q += 4; }
+            if (f & 0x200) { size = u32(d, q); q += 4; }
+            if (f & 0x400) { flags = u32(d, q); q += 4; }
+            if (f & 0x800) { cts = v ? s32(d, q) : u32(d, q); q += 4; }
+            list.push({ dts: dts, cts: cts, data: d.subarray(pos, pos + size), flags: flags });
+            dts += dur;
+            pos += size;
+          }
+        });
+      });
+    });
+    return out;
+  }
+
+  // ---- MPEG-TS writer ---------------------------------------------------------------
+  var PMT_PID = 0x1000, VIDEO_PID = 0x100, AUDIO_PID = 0x101;
+  var CRC_TABLE = (function () {
+    var t = [], c, i, j;
+    for (i = 0; i < 256; i++) {
+      c = i << 24;
+      for (j = 0; j < 8; j++) c = (c & 0x80000000) ? ((c << 1) ^ 0x04c11db7) : (c << 1);
+      t.push(c >>> 0);
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    var c = 0xffffffff;
+    for (var i = 0; i < bytes.length; i++) c = ((c << 8) ^ CRC_TABLE[((c >>> 24) ^ bytes[i]) & 0xff]) >>> 0;
+    return c;
+  }
+  function section(bytes) {
+    var c = crc32(bytes);
+    return [0].concat(bytes, [(c >>> 24) & 0xff, (c >>> 16) & 0xff, (c >>> 8) & 0xff, c & 0xff]);
+  }
+  var PAT = section([0x00, 0xb0, 0x0d, 0x00, 0x01, 0xc1, 0x00, 0x00, 0x00, 0x01, 0xe0 | (PMT_PID >> 8), PMT_PID & 0xff]);
+  function pmt(hasVideo, hasAudio) {
+    var streams = [];
+    if (hasVideo) streams = streams.concat([0x1b, 0xe0 | (VIDEO_PID >> 8), VIDEO_PID & 0xff, 0xf0, 0x00]);
+    if (hasAudio) streams = streams.concat([0x0f, 0xe0 | (AUDIO_PID >> 8), AUDIO_PID & 0xff, 0xf0, 0x00]);
+    var pcrPid = hasVideo ? VIDEO_PID : AUDIO_PID;
+    var body = [0x00, 0x01, 0xc1, 0x00, 0x00, 0xe0 | (pcrPid >> 8), pcrPid & 0xff, 0xf0, 0x00].concat(streams);
+    var len = body.length + 4;
+    return section([0x02, 0xb0 | (len >> 8), len & 0xff].concat(body));
+  }
+
+  // 33-bit timestamp field (PTS/DTS) with a 4-bit prefix.
+  function writeTs(buf, p, prefix, ts) {
+    buf[p] = (prefix << 4) | ((Math.floor(ts / 1073741824) & 0x07) << 1) | 1;
+    buf[p + 1] = Math.floor(ts / 4194304) & 0xff;
+    buf[p + 2] = ((Math.floor(ts / 32768) & 0x7f) << 1) | 1;
+    buf[p + 3] = Math.floor(ts / 128) & 0xff;
+    buf[p + 4] = ((ts % 128) << 1) | 1;
+  }
+
+  function Writer(cc) {
+    this.chunks = [];
+    this.cc = cc; // continuity counters per PID, kept across segments
+  }
+
+  // Splits one payload into 188-byte packets on `pid`. opts: { pcr, rai }
+  Writer.prototype.packets = function (pid, payload, opts) {
+    var off = 0, first = true;
+    while (off < payload.length || first) {
+      var pkt = new Uint8Array(188);
+      var afLen = 0; // adaptation field bytes including its length byte
+      var withPcr = first && opts && opts.pcr !== undefined;
+      if (withPcr) afLen = 8;
+      var room = 184 - afLen;
+      var chunk = Math.min(room, payload.length - off);
+      var stuff = room - chunk;
+      afLen += stuff; // a 1-byte adaptation field is just its (zero) length byte
+      var cc = this.cc[pid] = ((this.cc[pid] === undefined ? -1 : this.cc[pid]) + 1) & 15;
+      pkt[0] = 0x47;
+      pkt[1] = (first ? 0x40 : 0) | ((pid >> 8) & 0x1f);
+      pkt[2] = pid & 0xff;
+      pkt[3] = (afLen ? 0x30 : 0x10) | cc;
+      var p = 4;
+      if (afLen) {
+        pkt[p] = afLen - 1;
+        if (afLen > 1) {
+          pkt[p + 1] = (withPcr ? 0x10 : 0) | (first && opts && opts.rai ? 0x40 : 0);
+          var q = p + 2;
+          if (withPcr) {
+            var base = opts.pcr;
+            pkt[q] = Math.floor(base / 33554432) & 0xff;
+            pkt[q + 1] = Math.floor(base / 131072) & 0xff;
+            pkt[q + 2] = Math.floor(base / 512) & 0xff;
+            pkt[q + 3] = Math.floor(base / 2) & 0xff;
+            pkt[q + 4] = ((base % 2) << 7) | 0x7e;
+            pkt[q + 5] = 0;
+            q += 6;
+          }
+          while (q < p + afLen) pkt[q++] = 0xff;
+        }
+        p += afLen;
+      }
+      pkt.set(payload.subarray(off, off + chunk), p);
+      off += chunk;
+      first = false;
+      this.chunks.push(pkt);
+    }
+  };
+
+  Writer.prototype.psi = function (pid, bytes) {
+    var payload = new Uint8Array(184);
+    for (var i = 0; i < 184; i++) payload[i] = i < bytes.length ? bytes[i] : 0xff;
+    this.packets(pid, payload);
+  };
+
+  Writer.prototype.pes = function (pid, streamId, pts, dts, data, opts) {
+    var hasDts = dts !== null && dts !== pts;
+    var hdrLen = hasDts ? 10 : 5;
+    var total = 9 + hdrLen + data.length;
+    var pes = new Uint8Array(total);
+    var pesLen = total - 6;
+    pes[0] = 0; pes[1] = 0; pes[2] = 1; pes[3] = streamId;
+    if (pesLen > 0xffff || streamId === 0xe0) pesLen = 0;
+    pes[4] = pesLen >> 8; pes[5] = pesLen & 0xff;
+    pes[6] = 0x80; pes[7] = hasDts ? 0xc0 : 0x80; pes[8] = hdrLen;
+    writeTs(pes, 9, hasDts ? 3 : 2, pts);
+    if (hasDts) writeTs(pes, 14, 1, dts);
+    pes.set(data, 9 + hdrLen);
+    this.packets(pid, pes, opts);
+  };
+
+  Writer.prototype.result = function () {
+    var out = new Uint8Array(this.chunks.length * 188);
+    for (var i = 0; i < this.chunks.length; i++) out.set(this.chunks[i], i * 188);
+    return out;
+  };
+
+  var MAX_TS = 8589934592; // 2^33
+  function to90k(t, timescale) { return Math.round(t * 90000 / timescale) % MAX_TS; }
+
+  // AVCC sample -> Annex B access unit (AUD, SPS/PPS before keyframes).
+  function annexB(sample, tr) {
+    var d = sample.data, nals = [], p = 0, key = false, size = 6, i;
+    while (p + tr.nalLen <= d.length) {
+      var len = 0;
+      for (i = 0; i < tr.nalLen; i++) len = len * 256 + d[p + i];
+      p += tr.nalLen;
+      var nal = d.subarray(p, p + len);
+      p += len;
+      var nt = nal[0] & 31;
+      if (nt === 9) continue; // our own AUD goes first
+      if (nt === 5) key = true;
+      nals.push(nal);
+    }
+    if (key) nals = tr.sps.concat(tr.pps, nals);
+    for (i = 0; i < nals.length; i++) size += 4 + nals[i].length;
+    var out = new Uint8Array(size);
+    out.set([0, 0, 0, 1, 0x09, 0xf0], 0);
+    var q = 6;
+    for (i = 0; i < nals.length; i++) {
+      out.set([0, 0, 0, 1], q);
+      out.set(nals[i], q + 4);
+      q += 4 + nals[i].length;
+    }
+    return { data: out, key: key };
+  }
+
+  function adts(raw, tr) {
+    var len = raw.length + 7;
+    var out = new Uint8Array(len);
+    out[0] = 0xff; out[1] = 0xf1;
+    out[2] = (((tr.aot - 1) & 3) << 6) | (tr.freqIdx << 2) | (tr.channels >> 2);
+    out[3] = ((tr.channels & 3) << 6) | (len >> 11);
+    out[4] = (len >> 3) & 0xff;
+    out[5] = ((len & 7) << 5) | 0x1f;
+    out[6] = 0xfc;
+    out.set(raw, 7);
+    return out;
+  }
+
+  function Converter() {
+    this.cc = {};
+    this.converted = 0;
+  }
+
+  // init, seg: Uint8Array. Returns a Uint8Array of MPEG-TS packets.
+  Converter.prototype.convert = function (init, seg) {
+    var tracks = parseInit(init);
+    if (!tracks) throw new Error('fMP4 init segment without moov');
+    var bytrack = parseSegment(seg, tracks);
+    var video = null, audio = null, id;
+    for (id in tracks) {
+      if (!tracks.hasOwnProperty(id)) continue;
+      if (tracks[id].kind === 'video') video = { tr: tracks[id], samples: bytrack[id] || [] };
+      if (tracks[id].kind === 'audio') audio = { tr: tracks[id], samples: bytrack[id] || [] };
+    }
+    var w = new Writer(this.cc);
+    w.psi(0, PAT);
+    w.psi(PMT_PID, pmt(!!video, !!audio));
+    // Interleave by decode time so the demuxer sees audio and video together.
+    var events = [], i, s;
+    if (video) {
+      for (i = 0; i < video.samples.length; i++) {
+        s = video.samples[i];
+        events.push({ t: s.dts / video.tr.timescale, v: true, s: s });
+      }
+    }
+    if (audio) {
+      // Group a few AAC frames per PES (like Twitch's TS streams).
+      var group = [];
+      for (i = 0; i < audio.samples.length; i++) {
+        group.push(audio.samples[i]);
+        if (group.length === 4 || i === audio.samples.length - 1) {
+          events.push({ t: group[0].dts / audio.tr.timescale, v: false, g: group });
+          group = [];
+        }
+      }
+    }
+    events.sort(function (a, b) { return a.t - b.t; });
+    for (i = 0; i < events.length; i++) {
+      var ev = events[i];
+      if (ev.v) {
+        var tr = video.tr, au = annexB(ev.s, tr);
+        var dts = to90k(ev.s.dts, tr.timescale), pts = to90k(ev.s.dts + ev.s.cts, tr.timescale);
+        w.pes(VIDEO_PID, 0xe0, pts, dts, au.data, { pcr: dts, rai: au.key });
+      } else {
+        var atr = audio.tr, parts = [], size = 0, j;
+        for (j = 0; j < ev.g.length; j++) { parts.push(adts(ev.g[j].data, atr)); size += parts[j].length; }
+        var buf = new Uint8Array(size), q = 0;
+        for (j = 0; j < parts.length; j++) { buf.set(parts[j], q); q += parts[j].length; }
+        w.pes(AUDIO_PID, 0xc0, to90k(ev.g[0].dts, atr.timescale), null, buf);
+      }
+    }
+    this.converted++;
+    return w.result();
+  };
+
+  // hls.js fragment loader that converts fMP4 segments to TS. mapFor(url) returns the
+  // segment's init-segment URL (from #EXT-X-MAP, which the playlist rewrite removes).
+  function makeFragLoader(Hls, mapFor, conv, onError) {
+    var Base = Hls.DefaultConfig.loader;
+    var inits = {}; // url -> Promise<Uint8Array>
+
+    function getInit(url) {
+      if (!inits[url]) {
+        inits[url] = new Promise(function (resolve, reject) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) resolve(new Uint8Array(xhr.response));
+            else { delete inits[url]; reject(new Error('init HTTP ' + xhr.status)); }
+          };
+          xhr.onerror = function () { delete inits[url]; reject(new Error('init network error')); };
+          xhr.send();
+        });
+        var keys = Object.keys(inits);
+        if (keys.length > 20) delete inits[keys[0]];
+      }
+      return inits[url];
+    }
+
+    function Loader(config) { this.inner = new Base(config); }
+    Object.defineProperty(Loader.prototype, 'stats', { get: function () { return this.inner.stats; } });
+    Object.defineProperty(Loader.prototype, 'context', { get: function () { return this.inner.context; } });
+    Loader.prototype.load = function (context, config, callbacks) {
+      var mapUrl = mapFor(context.url);
+      if (!mapUrl) return this.inner.load(context, config, callbacks);
+      var initP = getInit(mapUrl);
+      var cb = {};
+      for (var k in callbacks) if (callbacks.hasOwnProperty(k)) cb[k] = callbacks[k];
+      cb.onSuccess = function (response, stats, ctx, net) {
+        var data = response.data;
+        if (!(data instanceof ArrayBuffer)) return callbacks.onSuccess(response, stats, ctx, net);
+        initP.then(function (init) {
+          var seg = new Uint8Array(data);
+          if (isFmp4(seg)) response.data = conv.convert(init, seg).buffer;
+          callbacks.onSuccess(response, stats, ctx, net);
+        }).catch(function (e) {
+          if (onError) onError(e);
+          callbacks.onSuccess(response, stats, ctx, net); // let hls.js try the original data
+        });
+      };
+      this.inner.load(context, config, cb);
+    };
+    Loader.prototype.abort = function () { this.inner.abort(); };
+    Loader.prototype.destroy = function () { this.inner.destroy(); };
+    return Loader;
+  }
+
+  var exportsObj = { Converter: Converter, parseInit: parseInit, parseSegment: parseSegment, isFmp4: isFmp4, makeFragLoader: makeFragLoader };
+  if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
+  root.TT = root.TT || {};
+  root.TT.fmp4ts = exportsObj;
+})(typeof window !== 'undefined' ? window : this);
+
 /* ---- player.js ---- */
 ;// Player: hls.js + playlist loader (ad blocking for live, proxied segments for VODs) + OSD.
 (function () {
@@ -1405,29 +1848,17 @@ TT.checkService = function () {
   }
 
   // ---- diagnostics overlay (debug build) ---------------------------------------
-  function newDiag(loaderCtrl) {
-    return { errs: [], mse: '', ctrl: loaderCtrl, native: null };
-  }
-
-  function supportInfo() {
-    var M = window.MediaSource;
-    function t(s) { try { return M && M.isTypeSupported(s) ? 'y' : 'n'; } catch (e) { return 'e'; } }
-    return 'mse mp4 v:' + t('video/mp4; codecs="avc1.4D401E"') + ' a:' + t('audio/mp4; codecs="mp4a.40.2"') +
-      ' av:' + t('video/mp4; codecs="avc1.4D401E,mp4a.40.2"') +
-      ' | native hls: ' + (video.canPlayType('application/vnd.apple.mpegurl') || 'no') +
-      '/' + (video.canPlayType('application/x-mpegURL') || 'no');
+  function newDiag(loaderCtrl, conv) {
+    return { errs: [], mse: '', ctrl: loaderCtrl, conv: conv };
   }
 
   // What hls.js / the <video> element are really doing, refreshed every second.
   function startDiag(my, info) {
     var diagEl = $('diag');
-    var support = supportInfo();
     var timer = setInterval(function () {
       if (my !== session) { clearInterval(timer); return; }
       var lines = ['Twizen ' + TT.VERSION + ' diagnostics'];
-      if (info.native) {
-        lines.push('mode: TV player (' + info.native + ')');
-      } else if (hls) {
+      if (hls) {
         var lv = (hls.levels || []).map(function (l) { return (l.height || '?') + 'p ' + (l.videoCodec || '?'); }).join(', ');
         var cur = hls.levels && hls.levels[hls.currentLevel];
         lines.push('levels: ' + (lv || 'none'));
@@ -1439,37 +1870,20 @@ TT.checkService = function () {
       lines.push('video: t=' + video.currentTime.toFixed(1) + ' ready=' + video.readyState + ' paused=' + video.paused +
         ' size=' + video.videoWidth + 'x' + video.videoHeight + ' buf=' + buf + ve);
       var pi = (info.ctrl && info.ctrl.lastInfo) || {};
-      if (!info.native) {
-        lines.push('playlist: segs=' + pi.segs + ' map=' + pi.map + ' ext=' + pi.ext + ' titles=' + pi.titles +
-          ' ad=' + (info.ctrl ? info.ctrl.adHow : '-'));
-      }
-      lines.push('support: ' + support);
+      lines.push('playlist: segs=' + pi.segs + ' map=' + pi.map + ' ext=' + pi.ext + ' titles=' + pi.titles +
+        ' ad=' + (info.ctrl ? info.ctrl.adHow : '-'));
+      lines.push('fmp4->ts: ' + (info.conv ? info.conv.converted + ' segments converted' : 'off'));
       lines.push('errors: ' + (info.errs.length ? info.errs.join(' ; ') : 'none'));
       diagEl.textContent = lines.join('\n');
       diagEl.style.display = 'block';
     }, 1000);
   }
 
-  // Plays the usher master playlist with the TV's built-in HLS player (no ad blocking).
-  function startNative(my, src, reason, info) {
-    destroyHls();
-    info.native = reason;
-    try { video.removeAttribute('src'); video.load(); } catch (e) { /* ignore */ }
-    video.onerror = function () {
-      if (my !== session || !video.error) return;
-      info.errs.push('TV player error ' + video.error.code + (video.error.message ? ' ' + video.error.message : ''));
-      if (info.errs.length > 4) info.errs.shift();
-      setStatus('TV player could not play this stream (error ' + video.error.code + ')');
-    };
-    video.onplaying = function () { if (my === session) setStatus(''); };
-    video.src = src;
-    var p = video.play();
-    if (p && p.catch) p.catch(function () { /* autoplay blocked: user presses play */ });
-    TT.toast('Using the TV player for this channel (ads are not blocked)', 6000);
-  }
-
   function startHls(my, loaderCtrl, src, isVod) {
-    hls = new Hls({
+    // Live: fMP4 segments (Enhanced Broadcasting) are repackaged as TS, see fmp4ts.js.
+    var conv = loaderCtrl ? new TT.fmp4ts.Converter() : null;
+    var info = newDiag(loaderCtrl, conv);
+    var cfg = {
       pLoader: makePlaylistLoader(loaderCtrl),
       liveSyncDurationCount: 3,
       liveMaxLatencyDurationCount: 10,
@@ -1477,7 +1891,12 @@ TT.checkService = function () {
       backBufferLength: 10,
       enableWorker: true,
       lowLatencyMode: false
-    });
+    };
+    if (conv) {
+      cfg.fLoader = TT.fmp4ts.makeFragLoader(Hls, function (url) { return loaderCtrl.mapFor(url); }, conv,
+        function (e) { info.errs.push('fmp4->ts: ' + (e.message || e)); if (info.errs.length > 4) info.errs.shift(); });
+    }
+    hls = new Hls(cfg);
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
       if (isVod) {
         var pos = savedPos(current.vod.id);
@@ -1491,7 +1910,6 @@ TT.checkService = function () {
       retries = 0;
       if (!video.paused || !pausedAt) setStatus('');
     });
-    var info = newDiag(loaderCtrl);
     startDiag(my, info);
     hls.on(Hls.Events.BUFFER_CODECS, function (ev, data) {
       var parts = [];
@@ -1509,18 +1927,6 @@ TT.checkService = function () {
         if (info.errs.length > 4) info.errs.shift();
       }
       if (!data.fatal || my !== session) return;
-      // Some TVs (Tizen) can't take muxed audio+video fMP4 (Enhanced Broadcasting) in one
-      // SourceBuffer, and hls.js can't split it. Hand the stream to the TV's own player.
-      if (!isVod && data.details === 'bufferAppendError' && /audiovideo/.test(info.mse)) {
-        var login = current && current.stream && current.stream.broadcaster.login;
-        if (login) {
-          var nat = TT.store.get('nativeChannels', {}) || {};
-          nat[login] = 1;
-          TT.store.set('nativeChannels', nat);
-        }
-        startNative(my, src, 'muxed fMP4 not supported by MSE', info);
-        return;
-      }
       TT.log('hls fatal error', data.type, data.details);
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 3) {
         retries++;
@@ -1570,13 +1976,6 @@ TT.checkService = function () {
         throw new Error('This stream is not available: ' + (info.authorization.reason || 'forbidden'));
       }
       var src = TT.api.usherUrl(login, token);
-      // Channels that already failed with muxed fMP4 go straight to the TV player.
-      if ((TT.store.get('nativeChannels', {}) || {})[login]) {
-        var info = newDiag(null);
-        startDiag(my, info);
-        startNative(my, src, 'remembered for this channel', info);
-        return;
-      }
       return TT.loadHls().then(function () { if (my === session) startHls(my, ctrl, src, false); });
     });
   }

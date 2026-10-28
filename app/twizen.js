@@ -1,9 +1,9 @@
-/* Twizen 0.5.2 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.5.3 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.2';
+TT.VERSION = '0.5.3';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -3332,8 +3332,7 @@ TT.checkService = function () {
     card.appendChild(ring);
     card.appendChild(TT.el('div', 'card-title', c.displayName || c.login));
     card.appendChild(TT.el('div', 'card-sub' + (c.stream ? ' live-text' : ''),
-      c.stream ? 'Live · ' + TT.fmtViewers(c.stream.viewersCount) : 'Offline'));
-    if (c.stream && c.stream.game) card.appendChild(TT.el('div', 'card-sub', c.stream.game.displayName));
+      c.stream ? 'Live' + (c.stream.game ? ' · ' + c.stream.game.displayName : '') : 'Offline'));
     return TT.focusable(card, function () {
       if (playIfLive && c.stream) openPlayer(c.stream, [c.stream]); else views.channel(c.login);
     });

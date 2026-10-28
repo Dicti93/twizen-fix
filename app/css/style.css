@@ -141,6 +141,30 @@ img { display: block; }
 .chan-status b { color: #ff8280; }
 .chan-title { color: #efeff1; margin-top: 0.2rem; }
 
+/* watch progress on video cards */
+.watched { position: absolute; left: 0; right: 0; bottom: 0; height: 0.25rem; background: rgba(255, 255, 255, 0.3); }
+.watched i { display: block; height: 100%; background: #9147ff; }
+
+/* TV-Programm */
+.days .btn { margin-bottom: 0.4rem; }
+.epg { margin-top: 0.4rem; }
+.epg-row { display: flex; align-items: stretch; margin-bottom: 0.5rem; }
+.epg-head { margin-bottom: 0.2rem; }
+.epg-chan { width: 12rem; flex: none; display: flex; align-items: center; font-size: 0.9rem; font-weight: 600; padding-right: 0.6rem; overflow: hidden; white-space: nowrap; }
+.epg-chan .av { width: 2rem; height: 2rem; margin-right: 0.6rem; }
+.epg-line { position: relative; flex: 1; min-height: 3.6rem; background: #18181b; border-radius: 0.3rem; }
+.epg-head .epg-line { min-height: 1.4rem; background: none; }
+.epg-hour { position: absolute; top: 0; font-size: 0.75rem; color: #adadb8; }
+.epg-now { position: absolute; top: 0; bottom: 0; width: 0.15rem; background: #eb0400; z-index: 2; }
+.epg-block {
+  position: absolute; top: 0.3rem; bottom: 0.3rem; background: #2f2f35; border-radius: 0.3rem; padding: 0.3rem 0.5rem;
+  overflow: hidden; border: 0.15rem solid transparent;
+}
+.epg-block.live { background: #4b1f6f; }
+.epg-block.focused { border-color: #fff; background: #9147ff; }
+.epg-time { font-size: 0.8rem; font-weight: 700; white-space: nowrap; }
+.epg-title { font-size: 0.75rem; color: #d0d0d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* schedule */
 .schedule { display: flex; flex-wrap: wrap; margin-bottom: 1.4rem; }
 .sched-item { width: 13rem; background: #18181b; border-radius: 0.4rem; padding: 0.7rem 0.9rem; margin: 0 0.8rem 0.8rem 0; }
@@ -237,6 +261,11 @@ img { display: block; }
 .kc.yellow { background: #fdd835; }
 .kc-ch { font-size: 0.65rem; font-weight: 800; border: 0.08rem solid #adadb8; border-radius: 0.2rem; padding: 0 0.25rem; margin-right: 0.35rem; }
 
+#stats {
+  display: none; position: absolute; left: 2rem; top: 8rem; z-index: 4; margin: 0; padding: 0.8rem 1.1rem;
+  background: rgba(0, 0, 0, 0.75); border-radius: 0.4rem; font: 0.85rem/1.5 "Samsung One", Roboto, Arial, sans-serif; color: #efeff1;
+}
+
 /* chat modes */
 #chat { display: none; }
 #player.chat-side #chat {
@@ -268,13 +297,21 @@ img { display: block; }
 /* ---- VOD ---- */
 .vod-only { display: none; }
 #player.is-vod .live-only { display: none; }
-#player.is-vod #chat { display: none; }
+#player.is-clip #chat { display: none; }
 .osd-progress { display: none; align-items: center; margin-bottom: 0.6rem; padding: 0.4rem 0.6rem; border-radius: 0.5rem; border: 0.15rem solid transparent; }
 #player.is-vod .osd-progress { display: flex; }
 .osd-progress.row-focused { border-color: #bf94ff; background: rgba(145, 71, 255, 0.15); }
 .osd-progress.scrubbing #osd-bar { background: #fff; }
-.osd-track { flex: 1; height: 0.35rem; background: rgba(255, 255, 255, 0.25); border-radius: 0.2rem; margin-right: 1rem; overflow: hidden; }
-#osd-bar { height: 100%; width: 0; background: #bf94ff; }
+.osd-track { flex: 1; height: 0.35rem; background: rgba(255, 255, 255, 0.25); border-radius: 0.2rem; margin-right: 1rem; position: relative; }
+#osd-marks { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.mark { position: absolute; top: -0.25rem; }
+.mark.chapter { width: 0.15rem; height: 0.85rem; background: #fff; }
+.mark.hype { width: 0.7rem; height: 0.7rem; margin-left: -0.35rem; top: -0.9rem; border-radius: 50%; background: #ff6905; box-shadow: 0 0 0.4rem #ff6905; }
+#seek-preview {
+  display: none; position: absolute; bottom: 1.2rem; transform: translateX(-50%); border: 0.15rem solid #fff;
+  border-radius: 0.3rem; background-color: #000; background-repeat: no-repeat; box-shadow: 0 0.3rem 1rem rgba(0, 0, 0, 0.6);
+}
+#osd-bar { height: 100%; width: 0; background: #bf94ff; border-radius: 0.2rem; }
 #osd-time { font-size: 1rem; color: #efeff1; white-space: nowrap; }
 
 /* ---- toast ---- */

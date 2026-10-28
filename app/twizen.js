@@ -1,9 +1,9 @@
-/* Twizen 0.4.4 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.5.0 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.4.4';
+TT.VERSION = '0.5.0';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -155,6 +155,34 @@ TT.recent = {
     TT.store.set('recent', list.slice(0, 20));
   }
 };
+
+// Favourite channels (logins, newest first): pinned in the sidebar, "live now" notices.
+TT.favorites = {
+  list: function () { return TT.store.get('favorites', []) || []; },
+  has: function (login) { return TT.favorites.list().indexOf(login) >= 0; },
+  toggle: function (login) {
+    var list = TT.favorites.list().filter(function (l) { return l !== login; });
+    var on = !TT.favorites.has(login);
+    if (on) list.unshift(login);
+    TT.store.set('favorites', list);
+    return on;
+  }
+};
+
+// Videos that were started, newest first: { vod, owner } for the "Weiterschauen" row.
+TT.watched = {
+  list: function () { return TT.store.get('watched', []) || []; },
+  add: function (vod, owner) {
+    var keep = { id: vod.id, title: vod.title, lengthSeconds: vod.lengthSeconds, publishedAt: vod.publishedAt,
+      previewThumbnailURL: vod.previewThumbnailURL, game: vod.game || null };
+    var list = TT.watched.list().filter(function (w) { return w.vod.id !== vod.id; });
+    list.unshift({ vod: keep, owner: { login: owner.login, displayName: owner.displayName, profileImageURL: owner.profileImageURL } });
+    TT.store.set('watched', list.slice(0, 30));
+  }
+};
+
+// Saved VOD positions in seconds: { vodId: seconds }.
+TT.vodPos = function (id) { return (TT.store.get('vodPos', {}) || {})[id] || 0; };
 
 TT.checkService = function () {
   return TT.http('GET', TT.PROXY + '/ping', { timeout: 3000 })
@@ -397,6 +425,90 @@ TT.checkService = function () {
         });
     },
 
+    // Chapters and seek-preview storyboard of a VOD: { chapters: [{ start, end, name }], seek }.
+    vodInfo: function (id) {
+      return gql('query($id:ID!){ video(id:$id){ seekPreviewsURL moments(first:50, momentRequestType:VIDEO_CHAPTER_MARKERS){ ' +
+        'edges{ node{ positionMilliseconds durationMilliseconds description } } } } }', { id: id })
+        .then(function (d) {
+          var v = d.video || {};
+          var chapters = edgesToNodes(v.moments).map(function (m) {
+            return { start: m.positionMilliseconds / 1000, end: (m.positionMilliseconds + (m.durationMilliseconds || 0)) / 1000,
+              name: m.description || '' };
+          });
+          return { chapters: chapters, seek: v.seekPreviewsURL || null };
+        });
+    },
+
+    // Chat messages of a VOD from `offset` seconds on (about a minute's worth).
+    vodComments: function (id, offset) {
+      return gql('query($id:ID!,$o:Int){ video(id:$id){ comments(contentOffsetSeconds:$o){ edges{ node{ id contentOffsetSeconds ' +
+        'commenter{ displayName login } message{ userColor userBadges{ setID } fragments{ text emote{ emoteID } } } } } } } }',
+        { id: id, o: Math.max(0, Math.floor(offset)) })
+        .then(function (d) { return d.video ? edgesToNodes(d.video.comments) : []; });
+    },
+
+    // The channel's latest past broadcast (while live: the recording in progress).
+    latestVod: function (login) {
+      return gql('query($l:String!){ user(login:$l){ login displayName profileImageURL(width:70) ' +
+        'videos(first:1, type:ARCHIVE, sort:TIME){ edges{ node{ id title lengthSeconds viewCount publishedAt status previewThumbnailURL(width:356,height:200) game{ name displayName } } } } } }', { l: login })
+        .then(function (d) {
+          var u = d.user;
+          var v = u && edgesToNodes(u.videos)[0];
+          return v ? { vod: v, owner: { login: u.login, displayName: u.displayName, profileImageURL: u.profileImageURL } } : null;
+        });
+    },
+
+    // Most-viewed clips of a channel or a category (period: LAST_DAY, LAST_WEEK, ...).
+    channelClips: function (login, period) {
+      return gql('query($l:String!){ user(login:$l){ clips(first:20, criteria:{period:' + (period || 'LAST_WEEK') +
+        ', sort:VIEWS_DESC}){ edges{ node{ slug title viewCount durationSeconds createdAt thumbnailURL(width:356,height:200) broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName } } } } } }', { l: login })
+        .then(function (d) { return d.user ? edgesToNodes(d.user.clips) : []; });
+    },
+    gameClips: function (name) {
+      var lang = TT.store.get('lang', 'de');
+      return gql('query($n:String!){ game(name:$n){ clips(first:20, criteria:{period:LAST_WEEK, sort:VIEWS_DESC' +
+        (lang === 'all' ? '' : ', languages:[' + lang.toUpperCase() + ']') + '}){ edges{ node{ slug title viewCount durationSeconds createdAt thumbnailURL(width:356,height:200) broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName } } } } } }', { n: name })
+        .then(function (d) { return d.game ? edgesToNodes(d.game.clips) : []; });
+    },
+    // Top clips of the last 24 h for several channels at once (one request).
+    clipsOfChannels: function (logins) {
+      if (!logins.length) return Promise.resolve([]);
+      return gql('query($l:[String!]){ users(logins:$l){ clips(first:3, criteria:{period:LAST_DAY, sort:VIEWS_DESC}){ ' +
+        'edges{ node{ slug title viewCount durationSeconds createdAt thumbnailURL(width:356,height:200) broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName } } } } } }', { l: logins.slice(0, 50) })
+        .then(function (d) {
+          var out = [];
+          (d.users || []).forEach(function (u) { if (u) out = out.concat(edgesToNodes(u.clips)); });
+          return out.sort(function (a, b) { return b.viewCount - a.viewCount; });
+        });
+    },
+    // Playable MP4 of a clip: { url } (signed with the clip's access token).
+    clipSource: function (slug) {
+      return gql('query($s:ID!){ clip(slug:$s){ playbackAccessToken(params:{platform:"web", playerBackend:"mediaplayer", ' +
+        'playerType:"site"}){ signature value } videoQualities{ quality sourceURL } } }', { s: slug })
+        .then(function (d) {
+          var c = d.clip;
+          if (!c || !c.videoQualities || !c.videoQualities.length) throw new Error('Clip nicht verfügbar');
+          var q = c.videoQualities.filter(function (v) { return +v.quality <= 1080; })[0] || c.videoQualities[0];
+          var t = c.playbackAccessToken;
+          return { url: q.sourceURL + (t ? '?sig=' + encodeURIComponent(t.signature) + '&token=' + encodeURIComponent(t.value) : '') };
+        });
+    },
+
+    // Schedules of several channels at once: [{ login, displayName, profileImageURL, stream, segments }].
+    schedules: function (logins) {
+      if (!logins.length) return Promise.resolve([]);
+      return gql('query($l:[String!]){ users(logins:$l){ login displayName profileImageURL(width:70) stream{ id } ' +
+        'channel{ schedule{ segmentList(first:20){ edges{ node{ startAt endAt title categories{ name displayName } } } } } } } }',
+        { l: logins.slice(0, 50) })
+        .then(function (d) {
+          return (d.users || []).filter(Boolean).map(function (u) {
+            var sch = u.channel && u.channel.schedule;
+            return { login: u.login, displayName: u.displayName, profileImageURL: u.profileImageURL, live: !!u.stream,
+              segments: sch ? edgesToNodes(sch.segmentList) : [] };
+          });
+        });
+    },
+
     // Is this channel raiding someone right now? Resolves { live, target } (target: user or null).
     raidState: function (login) {
       return gql('query($login:String!){ user(login:$login){ stream{ id } raid{ targetChannel{ login displayName ' +
@@ -482,7 +594,7 @@ TT.checkService = function () {
       return gql('query($login:String!){ user(login:$login){ id login displayName ' +
         'profileImageURL(width:150) description stream{ id title viewersCount createdAt ' +
         'previewImageURL(width:356,height:200) game{ name displayName } } ' +
-        'videos(first:30, sort:TIME){ edges{ node{ id title lengthSeconds viewCount publishedAt ' +
+        'videos(first:30, sort:TIME){ edges{ node{ id title lengthSeconds viewCount publishedAt status ' +
         'previewThumbnailURL(width:440,height:248) game{ name displayName } } } } } }', { login: login })
         .then(function (d) {
           var u = d.user;
@@ -1251,6 +1363,58 @@ TT.checkService = function () {
     };
   }
 
+  // ---- VOD chat replay -----------------------------------------------------------
+  // Messages are fetched about a minute ahead of the video position and shown when the
+  // video reaches their timestamp. A jump of more than 15 s clears the chat and refetches.
+  var replay = null; // { id, buf: [], seen: {}, until, fetching, lastT }
+
+  var BADGE = { broadcaster: 'mod', moderator: 'mod', vip: 'vip', subscriber: 'sub', founder: 'sub' };
+
+  function replayLine(c) {
+    if (!list) return;
+    var line = TT.el('div', 'chat-line');
+    var shown = {};
+    ((c.message && c.message.userBadges) || []).forEach(function (b) {
+      var k = b && BADGE[b.setID];
+      if (k && !shown[k]) { shown[k] = 1; line.appendChild(TT.el('span', 'bdg ' + k, { mod: 'M', vip: 'V', sub: 'S' }[k])); }
+    });
+    var who = c.commenter || {};
+    var name = TT.el('span', 'chat-name', (who.displayName || who.login || '?') + ': ');
+    name.style.color = (c.message && c.message.userColor) || '#b9a3e3';
+    line.appendChild(name);
+    var msg = TT.el('span', 'chat-text');
+    ((c.message && c.message.fragments) || []).forEach(function (f) {
+      if (f.emote && f.emote.emoteID) {
+        var img = TT.el('img', 'emote');
+        img.src = 'https://static-cdn.jtvnw.net/emoticons/v2/' + f.emote.emoteID + '/default/dark/1.0';
+        img.alt = f.text;
+        msg.appendChild(img);
+      } else {
+        appendText(msg, f.text);
+      }
+    });
+    line.appendChild(msg);
+    list.appendChild(line);
+    while (list.childNodes.length > MAX_LINES) list.removeChild(list.firstChild);
+  }
+
+  function replayFetch(from) {
+    var r = replay;
+    r.fetching = true;
+    TT.api.vodComments(r.id, from).then(function (items) {
+      if (replay !== r) return;
+      items.forEach(function (c) {
+        if (r.seen[c.id]) return;
+        r.seen[c.id] = 1;
+        r.buf.push(c);
+      });
+      r.buf.sort(function (a, b) { return a.contentOffsetSeconds - b.contentOffsetSeconds; });
+      var last = items.length ? items[items.length - 1].contentOffsetSeconds : from;
+      r.until = Math.max(last, from + 20); // quiet stretch: move on
+      r.fetching = false;
+    }, function () { if (replay === r) { r.fetching = false; r.until = from + 30; } });
+  }
+
   function applyMode() {
     var root = document.getElementById('player');
     root.className = root.className.replace(/\bchat-\w+\b/g, '').trim() + ' chat-' + mode;
@@ -1261,6 +1425,25 @@ TT.checkService = function () {
       box = document.getElementById('chat');
       list = document.getElementById('chat-list');
       applyMode();
+    },
+    // VOD: replay the chat of video `id` (owner's emotes) in step with replayTick(time).
+    openReplay: function (id, login) {
+      TT.chat.close();
+      TT.clear(list);
+      loadSevenTv(login.toLowerCase());
+      replay = { id: id, buf: [], seen: {}, until: -1, fetching: false, lastT: -100 };
+    },
+    replayTick: function (t) {
+      var r = replay;
+      if (!r || mode === 'off') return;
+      if (Math.abs(t - r.lastT) > 15) {
+        // Started or jumped: show the last few seconds of context right away.
+        TT.clear(list);
+        r.buf = []; r.seen = {}; r.until = t - 10; r.fetching = false;
+      }
+      r.lastT = t;
+      if (!r.fetching && r.until < t + 30) replayFetch(Math.max(r.until, t - 10));
+      while (r.buf.length && r.buf[0].contentOffsetSeconds <= t) replayLine(r.buf.shift());
     },
     open: function (login) {
       TT.chat.close();
@@ -1277,6 +1460,7 @@ TT.checkService = function () {
     },
     close: function () {
       clearTimeout(reconnectTimer);
+      replay = null;
       var old = ws;
       channel = null;
       ws = null;
@@ -1729,7 +1913,7 @@ TT.checkService = function () {
 ;// Player: hls.js + playlist loader (ad blocking for live, proxied segments for VODs) + OSD.
 (function () {
   var video = null, hls = null, ctrl = null, session = 0;
-  var current = null;        // { stream } for live, or { vod, owner } for videos
+  var current = null;        // { stream } live, { vod, owner } video, { vod, owner, clip, clips } clip
   var playlist = [];         // live streams for channel up/down
   var index = 0;
   var retries = 0, osdTimer = null, pausedAt = 0, saveTimer = null;
@@ -1828,11 +2012,224 @@ TT.checkService = function () {
 
   function updateProgress() {
     if (!current || !current.vod) return;
+    if (!current.clip) TT.chat.replayTick(video.currentTime);
     var dur = vodDuration();
     var pos = scrub.active ? scrub.target : video.currentTime;
     $('osd-bar').style.width = (dur ? Math.min(100, pos / dur * 100) : 0) + '%';
+    updateSeekPreview(pos, dur);
     $('osd-time').textContent = (scrub.active ? (scrub.dir < 0 ? '◀◀ ' : '▶▶ ') : '') +
       fmtTime(pos) + ' / ' + fmtTime(dur) + (scrub.active ? '   (' + stepLabel(scrub.step) + '-Schritte)' : '');
+  }
+
+  // ---- VOD extras: chapters, seek previews, hype moments ------------------------------
+  var extras = { chapters: [], seek: null, hype: [] };
+
+  function renderMarks() {
+    var box = $('osd-marks'), dur = vodDuration();
+    TT.clear(box);
+    if (!dur) return;
+    extras.chapters.forEach(function (c, i) {
+      if (i === 0) return;
+      var m = TT.el('i', 'mark chapter');
+      m.style.left = (c.start / dur * 100) + '%';
+      box.appendChild(m);
+    });
+    extras.hype.forEach(function (t) {
+      var m = TT.el('i', 'mark hype');
+      m.style.left = (t / dur * 100) + '%';
+      box.appendChild(m);
+    });
+  }
+
+  // Storyboard JSON: [{ width, height, cols, rows, count, interval, images, quality }].
+  function loadStoryboard(url, my) {
+    fetchText(url).then(function (text) {
+      if (my !== session) return;
+      var boards = JSON.parse(text);
+      var b = boards.filter(function (x) { return x.quality === 'high'; })[0] || boards[0];
+      if (!b || !b.images || !b.images.length) return;
+      extras.seek = { b: b, base: url.substring(0, url.lastIndexOf('/') + 1) };
+    }).catch(function () { /* no previews */ });
+  }
+
+  function updateSeekPreview(pos, dur) {
+    var el = $('seek-preview');
+    var sk = extras.seek;
+    if (!scrub.active || !sk || !dur) { el.style.display = 'none'; return; }
+    var b = sk.b, per = b.cols * b.rows;
+    var n = Math.min(b.count - 1, Math.floor(pos / (b.interval || (dur / b.count))));
+    var sheet = b.images[Math.floor(n / per)];
+    if (!sheet) { el.style.display = 'none'; return; }
+    var k = n % per;
+    el.style.width = b.width + 'px';
+    el.style.height = b.height + 'px';
+    el.style.backgroundImage = 'url("' + proxied(sk.base + sheet) + '")';
+    el.style.backgroundPosition = (-(k % b.cols) * b.width) + 'px ' + (-Math.floor(k / b.cols) * b.height) + 'px';
+    // Keep the whole picture over the bar, also at its very start and end.
+    var w = el.parentNode.clientWidth, x = Math.max(0, Math.min(1, pos / dur)) * w;
+    el.style.left = Math.max(b.width / 2, Math.min(w - b.width / 2, x)) + 'px';
+    el.style.display = 'block';
+  }
+
+  // Hype moments: sample the VOD chat every few minutes, measure messages per second and
+  // keep the strongest peaks (at least 10 min apart). Cached per video.
+  function loadHype(vod, my) {
+    var cache = TT.store.get('hype', {}) || {};
+    if (cache[vod.id] && vod.status !== 'RECORDING') { extras.hype = cache[vod.id]; renderMarks(); return; }
+    var len = vod.lengthSeconds || 0;
+    if (len < 900) return;
+    var step = Math.max(90, Math.round(len / 150)), samples = [], t = 30;
+    (function next() {
+      if (my !== session) return;
+      if (t >= len) return finish();
+      TT.api.vodComments(vod.id, t).then(function (items) {
+        if (items.length > 1) {
+          var span = items[items.length - 1].contentOffsetSeconds - items[0].contentOffsetSeconds;
+          samples.push({ t: items[0].contentOffsetSeconds, rate: items.length / Math.max(5, span) });
+        }
+      }).catch(function () {}).then(function () { t += step; setTimeout(next, 250); });
+    })();
+    function finish() {
+      if (samples.length < 5) return;
+      var rates = samples.map(function (x) { return x.rate; }).sort(function (a, b) { return a - b; });
+      var median = rates[Math.floor(rates.length / 2)];
+      var picks = [];
+      samples.slice().sort(function (a, b) { return b.rate - a.rate; }).forEach(function (x) {
+        if (picks.length >= 6 || x.rate < median * 2) return;
+        if (picks.some(function (y) { return Math.abs(y - x.t) < 600; })) return;
+        picks.push(x.t);
+      });
+      picks = picks.map(function (x) { return Math.max(0, x - 20); }).sort(function (a, b) { return a - b; });
+      extras.hype = picks;
+      if (vod.status !== 'RECORDING') {
+        var keys = Object.keys(cache);
+        if (keys.length > 30) delete cache[keys[0]];
+        cache[vod.id] = picks;
+        TT.store.set('hype', cache);
+      }
+      renderMarks();
+      if (picks.length) TT.toast(picks.length + ' Hype-Momente gefunden', 4000);
+      if (osdVisible) renderControls();
+    }
+  }
+
+  function currentChapter() {
+    var t = video.currentTime, cur = null;
+    extras.chapters.forEach(function (c) { if (c.start <= t + 1) cur = c; });
+    return cur;
+  }
+
+  function nextChapter() {
+    var t = video.currentTime;
+    var n = extras.chapters.filter(function (c) { return c.start > t + 5; })[0] || extras.chapters[0];
+    if (n) { video.currentTime = n.start; TT.toast('Kapitel: ' + n.name); }
+  }
+
+  function nextHype() {
+    var t = video.currentTime;
+    var n = extras.hype.filter(function (x) { return x > t + 5; })[0];
+    if (n === undefined) n = extras.hype[0];
+    if (n !== undefined) {
+      video.currentTime = n;
+      TT.toast('Hype-Moment ' + (extras.hype.indexOf(n) + 1) + ' von ' + extras.hype.length);
+    }
+  }
+
+  function loadExtras(vod, my) {
+    extras = { chapters: [], seek: null, hype: [] };
+    renderMarks();
+    TT.api.vodInfo(vod.id).then(function (info) {
+      if (my !== session) return;
+      extras.chapters = info.chapters;
+      renderMarks();
+      if (info.seek) loadStoryboard(info.seek, my);
+      if (osdVisible) renderControls();
+    }).catch(function () {});
+    setTimeout(function () { if (my === session) loadHype(vod, my); }, 3000);
+  }
+
+  // ---- live: watch from the start / the recording after the stream ----------------------
+  function watchFromStart() {
+    var b = current && current.stream && current.stream.broadcaster;
+    if (!b) return;
+    TT.api.latestVod(b.login).then(function (r) {
+      if (!r || r.vod.status !== 'RECORDING') { TT.toast('Für diesen Stream gibt es keine Aufzeichnung'); return; }
+      TT.player.openVod(r.vod, r.owner, { fromStart: true });
+    }).catch(function () { TT.toast('Die Aufzeichnung konnte nicht geladen werden'); });
+  }
+
+  function offerRecording() {
+    var b = current && current.stream && current.stream.broadcaster, my = session;
+    if (!b) return;
+    TT.api.latestVod(b.login).then(function (r) {
+      if (my !== session || !r || raidTarget) return;
+      current.ended = r;
+      setStatus('Der Stream ist beendet');
+      btnIndex = 0;
+      row = 'buttons';
+      showOsd(60000);
+    }).catch(function () {});
+  }
+
+  // ---- clips ----------------------------------------------------------------------------
+  function playClip(my) {
+    setStatus('Clip wird geladen …');
+    ctrl = null;
+    return TT.api.clipSource(current.clip.slug).then(function (src) {
+      if (my !== session) return;
+      video.src = src.url;
+      video.playbackRate = speed;
+      var pr = video.play();
+      if (pr && pr.catch) pr.catch(function () { /* user presses play */ });
+      TT.audio.attach(video, onCompressorFail);
+    });
+  }
+
+  function switchClip(delta) {
+    var list = current.clips || [];
+    var i = list.indexOf(current.clip) + delta;
+    if (i < 0 || i >= list.length) { TT.toast(delta > 0 ? 'Das war der letzte Clip' : 'Das ist der erste Clip'); return; }
+    TT.player.openClip(list[i], list);
+  }
+
+  // ---- playback speed (videos and clips) -------------------------------------------------
+  var speed = 1, SPEEDS = [1, 1.25, 1.5, 2];
+  function fmtSpeed(x) { return String(x).replace('.', ',') + '×'; }
+  function cycleSpeed() {
+    speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    video.playbackRate = speed;
+    TT.toast('Tempo: ' + fmtSpeed(speed));
+  }
+
+  // ---- INFO: playback statistics ------------------------------------------------------------
+  var statsTimer = null, lastConv = null;
+  function renderStats() {
+    var el = $('stats'), lines = [];
+    function line(k, v) { lines.push(k + ': ' + v); }
+    line('Bild', video.videoWidth ? video.videoWidth + '×' + video.videoHeight : '–');
+    if (hls && hls.levels && hls.levels.length) {
+      var l = hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel];
+      line('Qualität', qualityLabel() + (l && l.bitrate ? ' · ' + (l.bitrate / 1e6).toFixed(1).replace('.', ',') + ' Mbit/s' : ''));
+      if (hls.bandwidthEstimate) line('Leitung', (hls.bandwidthEstimate / 1e6).toFixed(1).replace('.', ',') + ' Mbit/s');
+      if (current && current.stream && hls.latency) line('Verzögerung', hls.latency.toFixed(1).replace('.', ',') + ' s');
+    }
+    var b = video.buffered, ahead = 0;
+    for (var i = 0; i < b.length; i++) if (b.start(i) <= video.currentTime + 0.5 && b.end(i) > video.currentTime) ahead = b.end(i) - video.currentTime;
+    line('Puffer', ahead.toFixed(1).replace('.', ',') + ' s');
+    var q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+    var dropped = q ? q.droppedVideoFrames : video.webkitDroppedFrameCount;
+    if (dropped !== undefined) line('Ausgelassene Bilder', dropped);
+    if (lastConv && lastConv.converted) line('Format', 'fMP4 → TS (' + lastConv.converted + ' Stücke umgepackt)');
+    if (ctrl) line('Werbeblocker', ctrl.adActive ? 'blockt gerade' : 'aktiv' + (ctrl.blockedCount ? ' · ' + ctrl.blockedCount + '× geblockt' : ''));
+    if (speed !== 1) line('Tempo', fmtSpeed(speed));
+    el.textContent = lines.join('\n');
+  }
+  function toggleStats() {
+    var el = $('stats');
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null; el.style.display = 'none'; return; }
+    renderStats();
+    el.style.display = 'block';
+    statsTimer = setInterval(renderStats, 1000);
   }
 
   // ---- OSD with focusable control row -----------------------------------------
@@ -1852,7 +2249,12 @@ TT.checkService = function () {
     down: 'M12 20l-6-7h4V4h4v9h4z',
     user: 'M12 3a4 4 0 110 8 4 4 0 010-8zm0 10c4.4 0 8 2 8 4.5V21H4v-3.5C4 15 7.6 13 12 13z',
     hd: 'M3 5h18v14H3zM6 9v6h2v-2h2v2h2V9h-2v2H8V9zm8 0v6h3a2 2 0 002-2v-2a2 2 0 00-2-2zm2 2h1v2h-1z',
-    heart: 'M12 21l-1.4-1.3C5.4 15 2 12 2 8.4 2 5.4 4.4 3 7.4 3c1.7 0 3.4.8 4.6 2.1C13.2 3.8 14.9 3 16.6 3 19.6 3 22 5.4 22 8.4c0 3.6-3.4 6.6-8.6 11.3z'
+    heart: 'M12 21l-1.4-1.3C5.4 15 2 12 2 8.4 2 5.4 4.4 3 7.4 3c1.7 0 3.4.8 4.6 2.1C13.2 3.8 14.9 3 16.6 3 19.6 3 22 5.4 22 8.4c0 3.6-3.4 6.6-8.6 11.3z',
+    start: 'M5 5h2v14H5zM9 12l10-7v14z',
+    flag: 'M5 3h2v18H5zM8 4h11l-2 4 2 4H8z',
+    fire: 'M12 2c1 4 6 6 6 12a6 6 0 01-12 0c0-3 2-5 3-6 0 2 1 3 2 3 0-4-1-6 1-9z',
+    speed: 'M12 4a9 9 0 019 9h-2a7 7 0 10-14 0H3a9 9 0 019-9zm1 9l4-5-6 4a1.5 1.5 0 102 1z',
+    next: 'M5 5l9 7-9 7zM16 5h3v14h-3z'
   };
 
   // Follow state of the channel on screen: null = unknown / signed out.
@@ -1911,16 +2313,32 @@ TT.checkService = function () {
   }
 
   function controlList() {
-    var isVod = !!(current && current.vod);
-    var list = [{ icon: video.paused ? 'play' : 'pause', label: video.paused ? 'Weiter' : 'Pause', fn: togglePause }];
-    if (isVod) {
+    var isVod = !!(current && current.vod), isClip = !!(current && current.clip);
+    var list = [];
+    if (current && current.ended) {
+      var ended = current.ended;
+      list.push({ icon: 'play', label: 'Aufzeichnung ansehen', fn: function () {
+        TT.player.openVod(ended.vod, ended.owner, { fromStart: true });
+      } });
+    }
+    list.push({ icon: video.paused ? 'play' : 'pause', label: video.paused ? 'Weiter' : 'Pause', fn: togglePause });
+    if (isVod && !isClip) {
       list.push({ icon: 'back', label: '1 Min.', fn: function () { seekBy(-60); } });
       list.push({ icon: 'fwd', label: '1 Min.', fn: function () { seekBy(60); } });
-    } else {
-      list.push({ icon: 'chat', label: 'Chat: ' + TT.chat.label(), fn: function () { TT.chat.cycle(); } });
+      if (extras.chapters.length > 1) {
+        var ch = currentChapter();
+        list.push({ icon: 'flag', label: 'Kapitel' + (ch && ch.name ? ': ' + ch.name : ''), fn: nextChapter });
+      }
+      if (extras.hype.length) list.push({ icon: 'fire', label: 'Hype-Moment', fn: nextHype });
     }
+    if (isClip && current.clips && current.clips.length > 1) {
+      list.push({ icon: 'next', label: 'Nächster Clip', fn: function () { switchClip(1); } });
+    }
+    if (!isClip) list.push({ icon: 'chat', label: 'Chat: ' + TT.chat.label(), fn: function () { TT.chat.cycle(); } });
+    if (!isVod) list.push({ icon: 'start', label: 'Von Anfang an', fn: watchFromStart });
+    if (isVod) list.push({ icon: 'speed', label: 'Tempo: ' + fmtSpeed(speed), fn: cycleSpeed });
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
-    list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
+    if (!isClip) list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
     if (following !== null) list.push({ icon: 'heart', label: following ? 'Folge ich' : 'Folgen', fn: toggleFollow });
     if (!isVod && playlist.length > 1) {
       list.push({ icon: 'up', label: 'Vorheriger', fn: function () { switchStream(-1); } });
@@ -1952,13 +2370,18 @@ TT.checkService = function () {
       k.appendChild(document.createTextNode(text));
       box.appendChild(k);
     }
-    if (!isVod) key('kc red', 'Chat');
+    var isClip = !!(current && current.clip);
+    if (!isClip) key('kc red', 'Chat');
     key('kc green', 'Kompressor');
     key('kc yellow', 'Kanal');
     var ch = TT.el('span', 'key-hint');
     ch.appendChild(TT.el('b', 'kc-ch', 'CH'));
-    ch.appendChild(document.createTextNode(isVod ? '± 5 Min.' : 'Stream wechseln'));
+    ch.appendChild(document.createTextNode(isClip ? 'Clip wechseln' : isVod ? '± 5 Min.' : 'Stream wechseln'));
     box.appendChild(ch);
+    var info = TT.el('span', 'key-hint');
+    info.appendChild(TT.el('b', 'kc-ch', 'INFO'));
+    info.appendChild(document.createTextNode('Statistik'));
+    box.appendChild(info);
   }
 
   function renderControls() {
@@ -2099,7 +2522,7 @@ TT.checkService = function () {
     fresh.id = 'video';
     video.parentNode.replaceChild(fresh, video);
     video = fresh;
-    video.addEventListener('timeupdate', updateProgress);
+    bindVideo();
     TT.audio.reset();
     if (current) play(true);
   }
@@ -2119,7 +2542,7 @@ TT.checkService = function () {
   function savedPos(id) { return (TT.store.get('vodPos', {}) || {})[id] || 0; }
 
   function savePos() {
-    if (!current || !current.vod || !video.currentTime) return;
+    if (!current || !current.vod || current.clip || !video.currentTime) return;
     var all = TT.store.get('vodPos', {}) || {};
     var keys = Object.keys(all);
     if (keys.length > 50) delete all[keys[0]];
@@ -2137,8 +2560,10 @@ TT.checkService = function () {
       pLoader: makePlaylistLoader(loaderCtrl),
       // Low latency stays ~2 segments behind live; 'normal' gives slow TVs more buffer.
       liveSyncDurationCount: TT.store.get('latency', 'low') === 'low' ? 2 : 3,
-      liveMaxLatencyDurationCount: TT.store.get('latency', 'low') === 'low' ? 6 : 10,
+      // Videos (also recordings still in progress) must never be pulled to the live edge.
+      liveMaxLatencyDurationCount: isVod ? Infinity : TT.store.get('latency', 'low') === 'low' ? 6 : 10,
       maxBufferLength: isVod ? 30 : 20,
+      startPosition: isVod ? (current.startAt || 0) : -1,
       backBufferLength: 10,
       enableWorker: true,
       lowLatencyMode: false
@@ -2147,6 +2572,7 @@ TT.checkService = function () {
       return loaderCtrl ? loaderCtrl.mapFor(url) : (vodMaps[url] || null);
     }, conv, function (e) { TT.log('fmp4->ts failed', e); });
     hls = new Hls(cfg);
+    lastConv = conv;
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
       // Fixed quality from Settings: the best level at or below the chosen height.
       var q = TT.store.get('quality', 'auto');
@@ -2158,16 +2584,20 @@ TT.checkService = function () {
         });
         hls.currentLevel = pick >= 0 ? pick : lowest;
       }
-      if (isVod) {
-        var pos = savedPos(current.vod.id);
-        if (pos > 30) { video.currentTime = pos; TT.toast('Weiter bei ' + fmtTime(pos)); }
-      }
+      if (isVod && current.startAt > 30) TT.toast('Weiter bei ' + fmtTime(current.startAt));
+      video.playbackRate = speed;
       var p = video.play();
       if (p && p.catch) p.catch(function () { /* autoplay blocked: user presses play */ });
     });
     hls.on(Hls.Events.FRAG_BUFFERED, function () {
       if (my !== session) return;
       retries = 0;
+      // Recordings still in progress load like live streams and ignore startPosition:
+      // put the video where it should start once the first piece is there.
+      if (isVod && !current.startDone) {
+        current.startDone = true;
+        if (Math.abs(video.currentTime - (current.startAt || 0)) > 15) video.currentTime = current.startAt || 0;
+      }
       if (!video.paused || !pausedAt) setStatus('');
     });
     hls.on(Hls.Events.ERROR, function (ev, data) {
@@ -2182,7 +2612,7 @@ TT.checkService = function () {
       if (offline) {
         setStatus('Der Stream ist offline');
         destroyHls();
-        if (!isVod) checkRaid(true);
+        if (!isVod) { checkRaid(true); offerRecording(); }
         return;
       }
       if (retries < 4) {
@@ -2246,7 +2676,7 @@ TT.checkService = function () {
     var my = ++session;
     destroyHls();
     if (!keepRetries) retries = 0;
-    var p = current.vod ? playVod(my, current.vod) : playLive(my, current.stream);
+    var p = current.clip ? playClip(my) : current.vod ? playVod(my, current.vod) : playLive(my, current.stream);
     p.catch(function (err) {
       if (my !== session) return;
       setStatus(String(err.message || err));
@@ -2296,15 +2726,27 @@ TT.checkService = function () {
     raidTimer = setInterval(function () { checkRaid(false); }, 20000);
   }
 
-  function setVodClass(isVod) {
+  function setVodClass(isVod, isClip) {
     var p = $('player');
-    p.className = p.className.replace(/\bis-vod\b/g, '').trim() + (isVod ? ' is-vod' : '');
+    p.className = p.className.replace(/\bis-(vod|clip)\b/g, '').trim() + (isVod ? ' is-vod' : '') + (isClip ? ' is-clip' : '');
+  }
+
+  // Video element events (again after replaceVideo()).
+  function bindVideo() {
+    video.addEventListener('timeupdate', updateProgress);
+    video.addEventListener('playing', function () { if (current && current.clip) setStatus(''); });
+    video.addEventListener('ended', function () {
+      if (current && current.clip) {
+        var list = current.clips || [], i = list.indexOf(current.clip);
+        if (i >= 0 && i < list.length - 1) TT.player.openClip(list[i + 1], list);
+      }
+    });
   }
 
   TT.player = {
     init: function () {
       video = $('video');
-      video.addEventListener('timeupdate', updateProgress);
+      bindVideo();
       TT.chat.init();
     },
 
@@ -2312,6 +2754,8 @@ TT.checkService = function () {
       hideOsd();
       cancelScrub();
       current = { stream: stream };
+      speed = 1;
+      extras = { chapters: [], seek: null, hype: [] };
       playlist = list || [stream];
       index = Math.max(0, playlist.indexOf(stream));
       setVodClass(false);
@@ -2333,14 +2777,19 @@ TT.checkService = function () {
     },
 
     // vod: { id, title, lengthSeconds, publishedAt, game }; owner: { login, displayName, profileImageURL }
-    openVod: function (vod, owner) {
+    // opts.fromStart: ignore the saved position (e.g. "Von Anfang an").
+    openVod: function (vod, owner, opts) {
       hideOsd();
       cancelScrub();
-      TT.chat.close();
       stopRaidWatch();
-      current = { vod: vod, owner: owner };
+      if (current && current.vod && !current.clip) savePos();
+      var pos = opts && opts.fromStart ? 0 : TT.vodPos(vod.id);
+      current = { vod: vod, owner: owner, startAt: pos > 30 ? pos : 0 };
+      speed = 1;
       playlist = [];
       TT.recent.add(owner);
+      TT.watched.add(vod, owner);
+      TT.chat.openReplay(vod.id, owner.login);
       loadFollowState();
       setVodClass(true);
       fillOsd(vod.title, owner, [vod.game ? vod.game.displayName : '',
@@ -2348,12 +2797,37 @@ TT.checkService = function () {
       showOsd();
       updateBadges();
       play();
+      loadExtras(vod, session);
       clearInterval(saveTimer);
       saveTimer = setInterval(savePos, 10000);
     },
 
+    // Clip (MP4) from `list`; the next one follows automatically when it ends.
+    openClip: function (clip, list) {
+      hideOsd();
+      cancelScrub();
+      stopRaidWatch();
+      TT.chat.close();
+      clearInterval(saveTimer);
+      var owner = clip.broadcaster || {};
+      current = { vod: { id: 'clip:' + clip.slug, title: clip.title, lengthSeconds: clip.durationSeconds, game: clip.game },
+        owner: owner, clip: clip, clips: list || [clip] };
+      extras = { chapters: [], seek: null, hype: [] };
+      renderMarks();
+      playlist = [];
+      loadFollowState();
+      setVodClass(true, true);
+      var n = current.clips.length;
+      fillOsd(clip.title, owner, [clip.game ? clip.game.displayName : '', TT.fmtCount(clip.viewCount) + ' Aufrufe',
+        n > 1 ? 'Clip ' + (current.clips.indexOf(clip) + 1) + ' von ' + n : ''].filter(Boolean).join('  ·  '));
+      showOsd();
+      updateBadges();
+      play();
+    },
+
     close: function () {
       stopRaidWatch();
+      if (statsTimer) toggleStats();
       cancelScrub();
       hideOsd();
       savePos();
@@ -2363,6 +2837,7 @@ TT.checkService = function () {
       TT.chat.close();
       current = null;
       ctrl = null;
+      extras = { chapters: [], seek: null, hype: [] };
       setVodClass(false);
       try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) { /* ignore */ }
       setStatus('');
@@ -2411,8 +2886,11 @@ TT.checkService = function () {
         case 'playpause': togglePause(); return true;
         case 'play': TT.player.resume(); return true;
         case 'pause': TT.player.pause(); return true;
+        case 'info':
+          toggleStats();
+          return true;
         case 'red':
-          TT.toast(isVod ? 'Bei Videos gibt es keinen Chat' : 'Chat: ' + TT.chat.cycle());
+          TT.toast(current && current.clip ? 'Bei Clips gibt es keinen Chat' : 'Chat: ' + TT.chat.cycle());
           if (osdVisible) showOsd();
           return true;
         case 'green':
@@ -2426,6 +2904,7 @@ TT.checkService = function () {
         }
         case 'chup':
         case 'chdown':
+          if (current && current.clip) { switchClip(k === 'chup' ? -1 : 1); return true; }
           if (isVod) { seekBy(k === 'chup' ? 300 : -300); return true; }
           switchStream(k === 'chup' ? -1 : 1);
           return true;
@@ -2598,6 +3077,7 @@ TT.checkService = function () {
   var main, stack = []; // entries: { name, el, lastFocus, onLeave }
   var sideItems = {};
   var followBox = null, followTimer = null, recBox = null, intlBox = null, prevLive = null;
+  var favBox = null, favHead = null, prevFavLive = null;
   var focusContent = false; // set when a page is opened from the sidebar menu
 
   var NAV = [
@@ -2605,6 +3085,7 @@ TT.checkService = function () {
     ['live', 'Live-Kanäle', 'M3 6h13v12H3zM17.5 10.5L22 7v10l-4.5-3.5z'],
     ['following', 'Folge ich', 'M12 21l-1.4-1.3C5.4 15 2 12 2 8.4 2 5.4 4.4 3 7.4 3c1.7 0 3.4.8 4.6 2.1C13.2 3.8 14.9 3 16.6 3 19.6 3 22 5.4 22 8.4c0 3.6-3.4 6.6-8.6 11.3z'],
     ['categories', 'Kategorien', 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z'],
+    ['program', 'TV-Programm', 'M4 5h16v15H4V5zm2 5v8h12v-8H6zM7 3h2v4H7zm8 0h2v4h-2zM8 12h4v3H8z'],
     ['search', 'Suche', 'M10 3a7 7 0 015.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z'],
     ['settings', 'Einstellungen', 'M19.4 13a7.6 7.6 0 000-2l2.1-1.6-2-3.5-2.5 1a7 7 0 00-1.7-1L15 3h-4l-.4 2.6a7 7 0 00-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 000 2l-2.1 1.6 2 3.5 2.5-1a7 7 0 001.7 1L11 21h4l.4-2.6a7 7 0 001.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7z']
   ];
@@ -2755,6 +3236,14 @@ TT.checkService = function () {
     thumb.appendChild(img);
     if (v.publishedAt) thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtAgo(v.publishedAt)));
     thumb.appendChild(TT.el('span', 'pill dur', fmtDuration(v.lengthSeconds || 0)));
+    if (v.status === 'RECORDING') thumb.appendChild(TT.el('span', 'pill live', 'Läuft'));
+    // How far it has been watched.
+    var pos = TT.vodPos(v.id);
+    if (pos && v.lengthSeconds) {
+      var bar = TT.el('div', 'watched');
+      bar.appendChild(TT.el('i')).style.width = Math.min(100, pos / v.lengthSeconds * 100) + '%';
+      thumb.appendChild(bar);
+    }
     lift.appendChild(thumb);
     card.appendChild(lift);
     var txt = TT.el('div', 'card-text pad');
@@ -2763,6 +3252,30 @@ TT.checkService = function () {
       v.game ? v.game.displayName : ''].filter(Boolean).join(' · ')));
     card.appendChild(txt);
     return TT.focusable(card, function () { openVodPlayer(v, owner); });
+  }
+
+  // Clip: plays as MP4; the rest of `list` follows automatically.
+  function clipCard(c, list) {
+    var b = c.broadcaster || {};
+    var card = TT.el('div', 'card stream-card clip-card');
+    var lift = TT.el('div', 'lift');
+    var thumb = TT.el('div', 'thumb');
+    thumb.appendChild(lazySrc(hideBroken(TT.el('img')), c.thumbnailURL));
+    thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtCount(c.viewCount) + ' Aufrufe'));
+    thumb.appendChild(TT.el('span', 'pill dur', fmtDuration(Math.round(c.durationSeconds || 0))));
+    lift.appendChild(thumb);
+    card.appendChild(lift);
+    var info = TT.el('div', 'card-info');
+    info.appendChild(avatar(b.profileImageURL));
+    var txt = TT.el('div', 'card-text');
+    txt.appendChild(TT.el('div', 'card-title', c.title || 'Clip'));
+    txt.appendChild(TT.el('div', 'card-sub', (b.displayName || b.login || '') + (c.createdAt ? ' · ' + TT.fmtAgo(c.createdAt) : '')));
+    if (c.game) txt.appendChild(TT.el('div', 'card-sub', c.game.displayName));
+    info.appendChild(txt);
+    card.appendChild(info);
+    TT.focusable(card, function () { showPlayer(); TT.player.openClip(c, list); });
+    card.onyellow = function () { if (b.login) views.channel(b.login); };
+    return card;
   }
 
   function categoryCard(g) {
@@ -2840,6 +3353,69 @@ TT.checkService = function () {
     return item;
   }
 
+  // One day of the TV-Programm: a row per channel with its streams as blocks on a timeline
+  // (at least 12–24 Uhr, widened to cover all streams of that day).
+  function renderEpg(box, chans, dayOffset) {
+    TT.clear(box);
+    var day = new Date(Date.now() + dayOffset * 86400000);
+    day.setHours(0, 0, 0, 0);
+    var d0 = day.getTime(), d1 = d0 + 86400000;
+    var rows = [], from = 12, to = 24;
+    chans.forEach(function (c) {
+      var segs = c.segments.map(function (seg) {
+        var a = Date.parse(seg.startAt), e = seg.endAt ? Date.parse(seg.endAt) : a + 3 * 3600000;
+        return { seg: seg, a: Math.max(a, d0), e: Math.min(e, d1) };
+      }).filter(function (x) { return x.e > x.a && x.a < d1 && x.e > d0; });
+      if (!segs.length) return;
+      segs.forEach(function (x) {
+        from = Math.min(from, Math.floor((x.a - d0) / 3600000));
+        to = Math.max(to, Math.ceil((x.e - d0) / 3600000));
+      });
+      rows.push({ c: c, segs: segs });
+    });
+    if (!rows.length) { box.appendChild(TT.el('div', 'message', 'An diesem Tag ist nichts geplant.')); return; }
+    var span = (to - from) * 3600000, t0 = d0 + from * 3600000;
+    function pct(t) { return ((t - t0) / span * 100) + '%'; }
+    var head = TT.el('div', 'epg-row epg-head');
+    head.appendChild(TT.el('div', 'epg-chan'));
+    var hours = TT.el('div', 'epg-line');
+    for (var h = from; h < to; h += 2) {
+      var lab = TT.el('span', 'epg-hour', two(h % 24) + ':00');
+      lab.style.left = pct(d0 + h * 3600000);
+      hours.appendChild(lab);
+    }
+    head.appendChild(hours);
+    box.appendChild(head);
+    var now = Date.now();
+    rows.forEach(function (r) {
+      var row = TT.el('div', 'epg-row');
+      var ch = TT.el('div', 'epg-chan');
+      ch.appendChild(avatar(r.c.profileImageURL));
+      ch.appendChild(TT.el('span', '', r.c.displayName || r.c.login));
+      row.appendChild(ch);
+      var line = TT.el('div', 'epg-line');
+      if (now > t0 && now < t0 + span) {
+        var nowMark = TT.el('i', 'epg-now');
+        nowMark.style.left = pct(now);
+        line.appendChild(nowMark);
+      }
+      r.segs.forEach(function (x) {
+        var a = new Date(x.a), e = new Date(x.e);
+        var live = r.c.live && x.a <= now && x.e >= now;
+        var blk = TT.el('div', 'epg-block' + (live ? ' live' : ''));
+        blk.style.left = pct(x.a);
+        blk.style.width = 'calc(' + ((x.e - x.a) / span * 100) + '% - 0.3rem)';
+        blk.appendChild(TT.el('div', 'epg-time', two(a.getHours()) + ':' + two(a.getMinutes()) + '–' +
+          two(e.getHours()) + ':' + two(e.getMinutes())));
+        var cat = x.seg.categories && x.seg.categories[0];
+        blk.appendChild(TT.el('div', 'epg-title', (x.seg.title || '') + (cat ? ' · ' + (cat.displayName || cat.name) : '')));
+        line.appendChild(TT.focusable(blk, function () { views.channel(r.c.login); }));
+      });
+      row.appendChild(line);
+      box.appendChild(row);
+    });
+  }
+
   function button(label, onSelect, cls) {
     return TT.focusable(TT.el('div', 'btn' + (cls ? ' ' + cls : ''), label), onSelect);
   }
@@ -2911,11 +3487,41 @@ TT.checkService = function () {
     });
   }
 
+  // Favourites at the top of the sidebar (live first). With favourites set, only they get
+  // "ist jetzt live" notices.
+  function refreshFavorites() {
+    if (!favBox) return Promise.resolve({});
+    var favs = TT.favorites.list();
+    favHead.style.display = favs.length ? '' : 'none';
+    if (!favs.length) { TT.clear(favBox); prevFavLive = null; return Promise.resolve({}); }
+    var had = favBox.contains(TT.focus.get());
+    return TT.api.usersByLogin(favs).then(function (users) {
+      var live = users.filter(function (u) { return u.stream; })
+        .sort(function (a, b) { return b.stream.viewersCount - a.stream.viewersCount; });
+      var off = users.filter(function (u) { return !u.stream; });
+      var liveStreams = live.map(function (u) { return u.stream; });
+      var liveLogins = {};
+      live.forEach(function (u) { liveLogins[u.login] = 1; });
+      TT.clear(favBox);
+      live.forEach(function (u) { favBox.appendChild(followEntry(u, u.stream, liveStreams)); });
+      off.forEach(function (u) { favBox.appendChild(followEntry(u, null)); });
+      if (had) focusFirstIn(favBox);
+      if (prevFavLive) {
+        var fresh = live.filter(function (u) { return !prevFavLive[u.login]; }).map(function (u) { return u.displayName || u.login; });
+        if (fresh.length) TT.toast('★ ' + fresh.join(', ') + (fresh.length > 1 ? ' sind' : ' ist') + ' jetzt live', 6000);
+      }
+      prevFavLive = liveLogins;
+      TT.lazy();
+      return liveLogins;
+    }).catch(function () { return {}; });
+  }
+
   // Live followed channels (and up to 15 offline ones) in the sidebar, refreshed every 3 min.
   function refreshFollows() {
     if (!followBox) return;
     clearTimeout(followTimer);
     followTimer = setTimeout(refreshFollows, 180000);
+    refreshFavorites();
     var hadFocus = followBox.contains(TT.focus.get());
     if (!TT.api.auth.current()) {
       TT.clear(followBox);
@@ -2933,8 +3539,10 @@ TT.checkService = function () {
       live.forEach(function (s) { liveLogins[s.broadcaster.login] = 1; });
       var offline = r[1].filter(function (c) { return !liveLogins[c.login]; }).slice(0, 15);
       TT.clear(followBox);
-      live.forEach(function (s) { followBox.appendChild(followEntry(s.broadcaster, s, live)); });
-      offline.forEach(function (c) { followBox.appendChild(followEntry(c, null)); });
+      var isFav = {};
+      TT.favorites.list().forEach(function (l) { isFav[l] = 1; });
+      live.forEach(function (s) { if (!isFav[s.broadcaster.login]) followBox.appendChild(followEntry(s.broadcaster, s, live)); });
+      offline.forEach(function (c) { if (!isFav[c.login]) followBox.appendChild(followEntry(c, null)); });
       if (failed) {
         var retry = TT.el('div', 'fol-login', 'Gefolgte Kanäle konnten nicht geladen werden. OK = nochmal versuchen');
         followBox.appendChild(TT.focusable(retry, refreshFollows));
@@ -2943,7 +3551,7 @@ TT.checkService = function () {
       }
       if (hadFocus) focusFirstIn(followBox);
       // "X ist jetzt live" for channels that went live since the last check (not on start-up).
-      if (prevLive) {
+      if (prevLive && !TT.favorites.list().length) {
         var fresh = live.filter(function (s) { return !prevLive[s.broadcaster.login]; })
           .map(function (s) { return s.broadcaster.displayName || s.broadcaster.login; });
         if (fresh.length) TT.toast(fresh.join(', ') + (fresh.length > 1 ? ' sind' : ' ist') + ' jetzt live', 6000);
@@ -2959,6 +3567,7 @@ TT.checkService = function () {
   function refreshRecommended(skip) {
     if (!recBox) return;
     skip = skip || {};
+    TT.favorites.list().forEach(function (l) { skip[l] = 1; }); // already pinned at the top
     function fill(box, lang) {
       var had = box.contains(TT.focus.get());
       return TT.api.topStreams(lang).then(function (top) {
@@ -2995,6 +3604,28 @@ TT.checkService = function () {
           el.appendChild(carousel('Live-Kanäle', ', denen du folgst',
             followed.map(function (s) { return streamCard(s, followed); })));
         }
+        // Videos started but not finished.
+        var cont = TT.watched.list().filter(function (w) { return TT.vodPos(w.vod.id) > 30; });
+        if (cont.length) {
+          el.appendChild(carousel('Weiter', 'schauen', cont.map(function (w) { return videoCard(w.vod, w.owner); })));
+        }
+        // "Was habe ich verpasst?": top clips of the last 24 h from your channels.
+        var missedSlot = TT.el('div');
+        el.appendChild(missedSlot);
+        var chanP = signedIn ? TT.api.followedChannels().then(function (l) { return l.map(function (c) { return c.login; }); })
+          .catch(function () { return []; }) : Promise.resolve([]);
+        chanP.then(function (logins) {
+          var all = TT.favorites.list().concat(logins, TT.recent.list().map(function (c) { return c.login; }));
+          var uniq = all.filter(function (l, i) { return all.indexOf(l) === i; });
+          return TT.api.clipsOfChannels(uniq);
+        }).then(function (clips) {
+          clips = clips.slice(0, 30);
+          if (clips.length) {
+            missedSlot.appendChild(carousel('Was habe ich verpasst?', ' Die besten Clips der letzten 24 Stunden',
+              clips.map(function (c) { return clipCard(c, clips); })));
+          }
+          TT.lazy();
+        }).catch(function () { /* optional row */ });
         // Recently watched channels (live ones play directly), loaded alongside.
         var recentSlot = TT.el('div');
         el.appendChild(recentSlot);
@@ -3084,6 +3715,43 @@ TT.checkService = function () {
       }, 'Gerade ist niemand live');
     },
 
+    // EPG-style week view of the schedules of your channels (favourites, followed, recently watched).
+    program: function () {
+      var el = section('TV-Programm', 'Geplante Streams deiner Kanäle');
+      push('program', el);
+      var signedIn = !!TT.api.auth.current();
+      var chanP = signedIn ? TT.api.followedChannels().then(function (l) { return l.map(function (c) { return c.login; }); })
+        .catch(function () { return []; }) : Promise.resolve([]);
+      var data = Promise.all([chanP]).then(function (r) {
+        var all = TT.favorites.list().concat(r[0], TT.recent.list().map(function (c) { return c.login; }));
+        return TT.api.schedules(all.filter(function (l, i) { return all.indexOf(l) === i; }));
+      }).then(function (chans) { return chans.filter(function (c) { return c.segments.length; }); });
+      load(el, data, function (chans) {
+        var days = TT.el('div', 'toolbar days');
+        var gridBox = TT.el('div', 'epg');
+        el.appendChild(days);
+        el.appendChild(gridBox);
+        var first = null, dayBtns = [];
+        for (var d = 0; d < 7; d++) {
+          (function (d) {
+            var date = new Date(Date.now() + d * 86400000);
+            var label = d === 0 ? 'Heute' : d === 1 ? 'Morgen' : DAYS[date.getDay()] + ' ' + two(date.getDate()) + '.' + two(date.getMonth() + 1) + '.';
+            var b = button(label, function () { showDay(d); });
+            dayBtns.push(b);
+            days.appendChild(b);
+            if (!first) first = b;
+          })(d);
+        }
+        function showDay(d) {
+          dayBtns.forEach(function (b, i) { b.classList.toggle('primary', i === d); });
+          renderEpg(gridBox, chans, d);
+          TT.lazy();
+        }
+        showDay(0);
+        return first;
+      }, 'Keiner deiner Kanäle hat einen Zeitplan. Folge Kanälen oder markiere Favoriten.');
+    },
+
     categories: function () {
       var el = section('Kategorien');
       push('categories', el);
@@ -3095,7 +3763,14 @@ TT.checkService = function () {
     category: function (g) {
       var el = section(g.displayName || g.name, g.viewersCount ? TT.fmtViewers(g.viewersCount) : '');
       push('category', el);
+      var clipsSlot = TT.el('div');
       load(el, TT.api.categoryStreams(g.name), function (streams) {
+        el.appendChild(clipsSlot);
+        TT.api.gameClips(g.name).then(function (clips) {
+          if (clips.length) clipsSlot.appendChild(carousel('Clips', ' der Woche', clips.map(function (c) { return clipCard(c, clips); })));
+          TT.lazy();
+        }).catch(function () {});
+        el.appendChild(heading('Live', ' (' + streams.length + ')'));
         el.appendChild(grid(streams.map(function (s) { return streamCard(s, streams); })));
       }, 'Gerade ist in dieser Kategorie niemand live');
     },
@@ -3129,6 +3804,16 @@ TT.checkService = function () {
           bar.appendChild(watch);
         }
         el.appendChild(bar);
+        // Favourite (local, works without an account).
+        var fav = button(TT.favorites.has(u.login) ? '★  Favorit' : '☆  Favorit', function () {
+          var on = TT.favorites.toggle(u.login);
+          fav.textContent = on ? '★  Favorit' : '☆  Favorit';
+          TT.toast(on ? u.displayName + ' ist jetzt ein Favorit' : u.displayName + ' ist kein Favorit mehr');
+          prevFavLive = null;
+          refreshFavorites();
+        });
+        bar.appendChild(fav);
+        if (!watch) watch = fav;
         // Follow / unfollow (signed in only).
         if (TT.api.auth.current()) {
           TT.api.isFollowing(u.login).then(function (f) {
@@ -3145,8 +3830,7 @@ TT.checkService = function () {
                 TT.toast('Folgen hat nicht geklappt: ' + (e.message || e));
               }).then(function () { busy = false; });
             });
-            bar.appendChild(fb);
-            if (!watch && top() && top().el === el && !inSidebar()) TT.focus.set(fb);
+            bar.insertBefore(fb, fav);
           }).catch(function () { /* no button */ });
         }
         // Stream schedule (if the channel has one), loaded alongside.
@@ -3159,6 +3843,13 @@ TT.checkService = function () {
           segs.forEach(function (seg) { list.appendChild(scheduleItem(seg)); });
           sched.appendChild(list);
         }).catch(function () { /* no schedule */ });
+        // Popular clips of the week, loaded alongside.
+        var clipsSlot = TT.el('div');
+        el.appendChild(clipsSlot);
+        TT.api.channelClips(login).then(function (clips) {
+          if (clips.length) clipsSlot.appendChild(carousel('Beliebte', ' Clips der Woche', clips.map(function (c) { return clipCard(c, clips); })));
+          TT.lazy();
+        }).catch(function () {});
         el.appendChild(heading('Vergangene', ' Übertragungen'));
         if (!u.videoList.length) el.appendChild(TT.el('div', 'message', 'Keine Videos vorhanden'));
         else el.appendChild(grid(u.videoList.map(function (v) { return videoCard(v, owner); })));
@@ -3227,7 +3918,7 @@ TT.checkService = function () {
       var query = '';
       var timer = null;
       var input = TT.el('div', 'search-box');
-      input.appendChild(icon(NAV[4][2]));
+      input.appendChild(icon(NAV[5][2]));
       var text = TT.el('span', 'search-text');
       input.appendChild(text);
       input.appendChild(TT.el('span', 'caret'));
@@ -3362,6 +4053,10 @@ TT.checkService = function () {
       });
       side.appendChild(nav);
       var lists = TT.el('div', 'side-lists');
+      favHead = TT.el('div', 'side-h', '★ Favoriten');
+      lists.appendChild(favHead);
+      favBox = TT.el('div', 'side-follows');
+      lists.appendChild(favBox);
       lists.appendChild(TT.el('div', 'side-h', 'Gefolgte Kanäle'));
       followBox = TT.el('div', 'side-follows');
       lists.appendChild(followBox);
@@ -3411,13 +4106,13 @@ TT.checkService = function () {
     403: 'red', 404: 'green', 405: 'yellow', 406: 'blue',
     10252: 'playpause', 32: 'playpause', 415: 'play', 19: 'pause', 413: 'stop',
     427: 'chup', 428: 'chdown', 33: 'chup', 34: 'chdown',
-    412: 'rewind', 417: 'ff'
+    412: 'rewind', 417: 'ff', 457: 'info'
   };
   // Letter shortcuts for desktop testing, only while the player is open.
-  var PLAYER_LETTERS = { 82: 'red', 71: 'green' };
+  var PLAYER_LETTERS = { 82: 'red', 71: 'green', 73: 'info' };
   var TIZEN_KEYS = ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop',
     'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow', 'ColorF3Blue', 'ChannelUp', 'ChannelDown',
-    'MediaRewind', 'MediaFastForward'];
+    'MediaRewind', 'MediaFastForward', 'Info'];
   var lastRootBack = 0;
 
   function registerTizenKeys() {

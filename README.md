@@ -35,6 +35,19 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 Mit `@0` lädt TizenBrew immer die neueste Version 0.x, Updates kommen also von selbst (beim nächsten Start).
 Eine bestimmte Version lässt sich mit z. B. `@v0.5.4` festhalten.
 
+### Eigene App mit Symbol (optional)
+
+Die kleine App **Twizen** (Ordner [`launcher/`](launcher)) erscheint mit eigenem Symbol in der App-Leiste des Fernsehers
+und startet TizenBrew direkt mit Twizen, ohne Umweg über das TizenBrew-Menü.
+
+1. Fernseher im Entwicklermodus, TizenBrew mit dem Modul `Dicti93/twizen-fix@0` eingerichtet (siehe oben).
+2. [TizenBrew Installer](https://github.com/reisxd/TizenBrewInstaller) auf dem PC starten, **Connect to TV** mit der IP
+   des Fernsehers.
+3. **Install from GitHub** wählen und `Dicti93/twizen-fix` eingeben.
+
+Die App lädt immer die aktuelle Twizen-Version, sie muss für Updates nicht neu installiert werden. Sie wird bei einem
+Tag `launcher-v*` von GitHub Actions gebaut, signiert und als Release veröffentlicht.
+
 ## Fernbedienung
 
 | Taste | Übersicht | Player |

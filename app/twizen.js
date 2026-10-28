@@ -519,13 +519,17 @@ TT.checkService = function () {
     var lines = text.split(/\r?\n/);
     var p = { targetDuration: 2, mediaSequence: 0, ended: false, segments: [], adMarkers: AD_MARKER.test(text) };
     var cur = {};
+    var map = null; // fMP4 streams (e.g. Enhanced Broadcasting) need their init segment
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
       if (line.charAt(0) !== '#') {
         cur.uri = line;
+        cur.map = map;
         p.segments.push(cur);
         cur = {};
+      } else if (line.indexOf('#EXT-X-MAP:') === 0) {
+        map = line;
       } else if (line.indexOf('#EXTINF:') === 0) {
         var body = line.substring(8);
         var comma = body.indexOf(',');
@@ -630,9 +634,13 @@ TT.checkService = function () {
 
     var target = parsed.targetDuration;
     for (i = start; i < segs.length; i++) target = Math.max(target, Math.ceil(segs[i].duration));
-    var out = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:' + target,
+    var hasMap = false;
+    for (i = start; i < segs.length; i++) if (segs[i].map) hasMap = true;
+    var out = ['#EXTM3U', '#EXT-X-VERSION:' + (hasMap ? 6 : 3), '#EXT-X-TARGETDURATION:' + target,
       '#EXT-X-MEDIA-SEQUENCE:' + sns[start]];
+    var lastMap = null;
     for (i = start; i < segs.length; i++) {
+      if (segs[i].map && segs[i].map !== lastMap) { out.push(segs[i].map); lastMap = segs[i].map; }
       if (segs[i].pdt) out.push('#EXT-X-PROGRAM-DATE-TIME:' + segs[i].pdt);
       out.push('#EXTINF:' + segs[i].duration.toFixed(3) + ',live');
       out.push(segs[i].uri);
@@ -1407,9 +1415,26 @@ TT.checkService = function () {
     hls.on(Hls.Events.FRAG_BUFFERED, function () {
       if (my !== session) return;
       retries = 0;
+      if (diagShown && video.currentTime === 0) return; // keep the diagnostics visible
       if (!video.paused || !pausedAt) setStatus('');
     });
+    // Diagnostics: if nothing plays after 15 s, show what the stream contains and the
+    // last player error, so a black screen can be reported with details.
+    var lastErr = '';
+    var diagShown = false;
+    setTimeout(function () {
+      if (my !== session || !hls || video.currentTime > 0) return;
+      diagShown = true;
+      var lv = (hls.levels || []).map(function (l) {
+        return (l.height || '?') + 'p ' + (l.videoCodec || l.codecSet || '?');
+      }).join(', ');
+      var cur = hls.levels && hls.levels[hls.currentLevel];
+      setStatus('No playback after 15 s. Levels: ' + (lv || 'none') +
+        ' | playing: ' + (cur ? cur.height + 'p' : '?') +
+        ' | last error: ' + (lastErr || 'none'));
+    }, 15000);
     hls.on(Hls.Events.ERROR, function (ev, data) {
+      if (my === session) lastErr = data.details + (data.reason ? ' (' + data.reason + ')' : '');
       if (!data.fatal || my !== session) return;
       TT.log('hls fatal error', data.type, data.details);
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 3) {

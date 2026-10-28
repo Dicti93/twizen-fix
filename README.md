@@ -2,6 +2,8 @@
 > Only change: the player skips stream qualities above 1080p and codecs the TV reports as
 > unsupported (`isPlayable()` in `app/twizen.js`). This fixes the black screen on channels
 > with a 1440p source.
+> fix2: keep `#EXT-X-MAP` (fMP4 init segment) when the ad blocker rewrites media playlists,
+> and show diagnostics on screen if nothing plays after 15 s.
 
 # Twizen
 

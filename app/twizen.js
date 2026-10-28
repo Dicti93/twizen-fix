@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.3.3-fix3';
+TT.VERSION = '0.3.3-fix4';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -1404,6 +1404,70 @@ TT.checkService = function () {
     TT.store.set('vodPos', all);
   }
 
+  // ---- diagnostics overlay (debug build) ---------------------------------------
+  function newDiag(loaderCtrl) {
+    return { errs: [], mse: '', ctrl: loaderCtrl, native: null };
+  }
+
+  function supportInfo() {
+    var M = window.MediaSource;
+    function t(s) { try { return M && M.isTypeSupported(s) ? 'y' : 'n'; } catch (e) { return 'e'; } }
+    return 'mse mp4 v:' + t('video/mp4; codecs="avc1.4D401E"') + ' a:' + t('audio/mp4; codecs="mp4a.40.2"') +
+      ' av:' + t('video/mp4; codecs="avc1.4D401E,mp4a.40.2"') +
+      ' | native hls: ' + (video.canPlayType('application/vnd.apple.mpegurl') || 'no') +
+      '/' + (video.canPlayType('application/x-mpegURL') || 'no');
+  }
+
+  // What hls.js / the <video> element are really doing, refreshed every second.
+  function startDiag(my, info) {
+    var diagEl = $('diag');
+    var support = supportInfo();
+    var timer = setInterval(function () {
+      if (my !== session) { clearInterval(timer); return; }
+      var lines = ['Twizen ' + TT.VERSION + ' diagnostics'];
+      if (info.native) {
+        lines.push('mode: TV player (' + info.native + ')');
+      } else if (hls) {
+        var lv = (hls.levels || []).map(function (l) { return (l.height || '?') + 'p ' + (l.videoCodec || '?'); }).join(', ');
+        var cur = hls.levels && hls.levels[hls.currentLevel];
+        lines.push('levels: ' + (lv || 'none'));
+        lines.push('playing: ' + (cur ? cur.height + 'p ' + (cur.videoCodec || '?') : '?') + ' (level ' + hls.currentLevel + ')');
+        lines.push('mse: ' + (info.mse || 'none'));
+      }
+      var b = video.buffered, buf = b && b.length ? b.start(0).toFixed(1) + '-' + b.end(b.length - 1).toFixed(1) : 'none';
+      var ve = video.error ? ' error=' + video.error.code + (video.error.message ? ' ' + video.error.message : '') : '';
+      lines.push('video: t=' + video.currentTime.toFixed(1) + ' ready=' + video.readyState + ' paused=' + video.paused +
+        ' size=' + video.videoWidth + 'x' + video.videoHeight + ' buf=' + buf + ve);
+      var pi = (info.ctrl && info.ctrl.lastInfo) || {};
+      if (!info.native) {
+        lines.push('playlist: segs=' + pi.segs + ' map=' + pi.map + ' ext=' + pi.ext + ' titles=' + pi.titles +
+          ' ad=' + (info.ctrl ? info.ctrl.adHow : '-'));
+      }
+      lines.push('support: ' + support);
+      lines.push('errors: ' + (info.errs.length ? info.errs.join(' ; ') : 'none'));
+      diagEl.textContent = lines.join('\n');
+      diagEl.style.display = 'block';
+    }, 1000);
+  }
+
+  // Plays the usher master playlist with the TV's built-in HLS player (no ad blocking).
+  function startNative(my, src, reason, info) {
+    destroyHls();
+    info.native = reason;
+    try { video.removeAttribute('src'); video.load(); } catch (e) { /* ignore */ }
+    video.onerror = function () {
+      if (my !== session || !video.error) return;
+      info.errs.push('TV player error ' + video.error.code + (video.error.message ? ' ' + video.error.message : ''));
+      if (info.errs.length > 4) info.errs.shift();
+      setStatus('TV player could not play this stream (error ' + video.error.code + ')');
+    };
+    video.onplaying = function () { if (my === session) setStatus(''); };
+    video.src = src;
+    var p = video.play();
+    if (p && p.catch) p.catch(function () { /* autoplay blocked: user presses play */ });
+    TT.toast('Using the TV player for this channel (ads are not blocked)', 6000);
+  }
+
   function startHls(my, loaderCtrl, src, isVod) {
     hls = new Hls({
       pLoader: makePlaylistLoader(loaderCtrl),
@@ -1427,11 +1491,8 @@ TT.checkService = function () {
       retries = 0;
       if (!video.paused || !pausedAt) setStatus('');
     });
-    // Diagnostics overlay (debug build): what hls.js and the <video> element are really
-    // doing, refreshed every second while this session plays.
-    var errs = [];
-    var mse = '';
-    var diagEl = $('diag');
+    var info = newDiag(loaderCtrl);
+    startDiag(my, info);
     hls.on(Hls.Events.BUFFER_CODECS, function (ev, data) {
       var parts = [];
       for (var k in data) {
@@ -1439,34 +1500,27 @@ TT.checkService = function () {
           parts.push(k + '=' + (data[k].codec || '?') + ' ' + (data[k].container || ''));
         }
       }
-      mse = parts.join(' | ');
+      info.mse = parts.join(' | ');
     });
-    var diagTimer = setInterval(function () {
-      if (my !== session || !hls) { clearInterval(diagTimer); return; }
-      var lv = (hls.levels || []).map(function (l) {
-        return (l.height || '?') + 'p ' + (l.videoCodec || '?');
-      }).join(', ');
-      var cur = hls.levels && hls.levels[hls.currentLevel];
-      var b = video.buffered, buf = b && b.length ? b.start(0).toFixed(1) + '-' + b.end(b.length - 1).toFixed(1) : 'none';
-      var pi = (loaderCtrl && loaderCtrl.lastInfo) || {};
-      diagEl.textContent = 'Twizen ' + TT.VERSION + ' diagnostics\n' +
-        'levels: ' + (lv || 'none') + '\n' +
-        'playing: ' + (cur ? cur.height + 'p ' + (cur.videoCodec || '?') : '?') + ' (level ' + hls.currentLevel + ')\n' +
-        'mse: ' + (mse || 'none') + '\n' +
-        'video: t=' + video.currentTime.toFixed(1) + ' ready=' + video.readyState + ' paused=' + video.paused +
-        ' size=' + video.videoWidth + 'x' + video.videoHeight + ' buf=' + buf + '\n' +
-        'playlist: segs=' + pi.segs + ' map=' + pi.map + ' ext=' + pi.ext + ' titles=' + pi.titles +
-        ' ad=' + (loaderCtrl ? loaderCtrl.adHow : '-') + '\n' +
-        'errors: ' + (errs.length ? errs.join(' ; ') : 'none');
-      diagEl.style.display = 'block';
-    }, 1000);
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (my === session) {
-        errs.push((data.fatal ? 'FATAL ' : '') + data.details + (data.reason ? ' (' + data.reason + ')' : '') +
+        info.errs.push((data.fatal ? 'FATAL ' : '') + data.details + (data.reason ? ' (' + data.reason + ')' : '') +
           (data.error && data.error.message ? ' [' + data.error.message + ']' : ''));
-        if (errs.length > 4) errs.shift();
+        if (info.errs.length > 4) info.errs.shift();
       }
       if (!data.fatal || my !== session) return;
+      // Some TVs (Tizen) can't take muxed audio+video fMP4 (Enhanced Broadcasting) in one
+      // SourceBuffer, and hls.js can't split it. Hand the stream to the TV's own player.
+      if (!isVod && data.details === 'bufferAppendError' && /audiovideo/.test(info.mse)) {
+        var login = current && current.stream && current.stream.broadcaster.login;
+        if (login) {
+          var nat = TT.store.get('nativeChannels', {}) || {};
+          nat[login] = 1;
+          TT.store.set('nativeChannels', nat);
+        }
+        startNative(my, src, 'muxed fMP4 not supported by MSE', info);
+        return;
+      }
       TT.log('hls fatal error', data.type, data.details);
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 3) {
         retries++;
@@ -1516,6 +1570,13 @@ TT.checkService = function () {
         throw new Error('This stream is not available: ' + (info.authorization.reason || 'forbidden'));
       }
       var src = TT.api.usherUrl(login, token);
+      // Channels that already failed with muxed fMP4 go straight to the TV player.
+      if ((TT.store.get('nativeChannels', {}) || {})[login]) {
+        var info = newDiag(null);
+        startDiag(my, info);
+        startNative(my, src, 'remembered for this channel', info);
+        return;
+      }
       return TT.loadHls().then(function () { if (my === session) startHls(my, ctrl, src, false); });
     });
   }

@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.3.3-fix5';
+TT.VERSION = '0.3.3-fix6';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -699,16 +699,6 @@ TT.checkService = function () {
   AdController.prototype.processMedia = function (url, text) {
     var self = this;
     var parsed = parseMedia(text);
-    // For the on-screen diagnostics.
-    var titles = {};
-    for (var i = 0; i < parsed.segments.length; i++) titles[parsed.segments[i].title || '(none)'] = 1;
-    var first = parsed.segments[0];
-    self.lastInfo = {
-      segs: parsed.segments.length,
-      map: !!(first && first.map),
-      titles: Object.keys(titles).join('/'),
-      ext: first ? (first.uri.split('?')[0].split('.').pop() || '?').slice(-4) : '?'
-    };
     if (!hasAds(parsed)) {
       self.setAd(false, null);
       return Promise.resolve(self.normalizer.render(parsed) || text);
@@ -1847,42 +1837,9 @@ TT.checkService = function () {
     TT.store.set('vodPos', all);
   }
 
-  // ---- diagnostics overlay (debug build) ---------------------------------------
-  function newDiag(loaderCtrl, conv) {
-    return { errs: [], mse: '', ctrl: loaderCtrl, conv: conv };
-  }
-
-  // What hls.js / the <video> element are really doing, refreshed every second.
-  function startDiag(my, info) {
-    var diagEl = $('diag');
-    var timer = setInterval(function () {
-      if (my !== session) { clearInterval(timer); return; }
-      var lines = ['Twizen ' + TT.VERSION + ' diagnostics'];
-      if (hls) {
-        var lv = (hls.levels || []).map(function (l) { return (l.height || '?') + 'p ' + (l.videoCodec || '?'); }).join(', ');
-        var cur = hls.levels && hls.levels[hls.currentLevel];
-        lines.push('levels: ' + (lv || 'none'));
-        lines.push('playing: ' + (cur ? cur.height + 'p ' + (cur.videoCodec || '?') : '?') + ' (level ' + hls.currentLevel + ')');
-        lines.push('mse: ' + (info.mse || 'none'));
-      }
-      var b = video.buffered, buf = b && b.length ? b.start(0).toFixed(1) + '-' + b.end(b.length - 1).toFixed(1) : 'none';
-      var ve = video.error ? ' error=' + video.error.code + (video.error.message ? ' ' + video.error.message : '') : '';
-      lines.push('video: t=' + video.currentTime.toFixed(1) + ' ready=' + video.readyState + ' paused=' + video.paused +
-        ' size=' + video.videoWidth + 'x' + video.videoHeight + ' buf=' + buf + ve);
-      var pi = (info.ctrl && info.ctrl.lastInfo) || {};
-      lines.push('playlist: segs=' + pi.segs + ' map=' + pi.map + ' ext=' + pi.ext + ' titles=' + pi.titles +
-        ' ad=' + (info.ctrl ? info.ctrl.adHow : '-'));
-      lines.push('fmp4->ts: ' + (info.conv ? info.conv.converted + ' segments converted' : 'off'));
-      lines.push('errors: ' + (info.errs.length ? info.errs.join(' ; ') : 'none'));
-      diagEl.textContent = lines.join('\n');
-      diagEl.style.display = 'block';
-    }, 1000);
-  }
-
   function startHls(my, loaderCtrl, src, isVod) {
     // Live: fMP4 segments (Enhanced Broadcasting) are repackaged as TS, see fmp4ts.js.
     var conv = loaderCtrl ? new TT.fmp4ts.Converter() : null;
-    var info = newDiag(loaderCtrl, conv);
     var cfg = {
       pLoader: makePlaylistLoader(loaderCtrl),
       liveSyncDurationCount: 3,
@@ -1894,7 +1851,7 @@ TT.checkService = function () {
     };
     if (conv) {
       cfg.fLoader = TT.fmp4ts.makeFragLoader(Hls, function (url) { return loaderCtrl.mapFor(url); }, conv,
-        function (e) { info.errs.push('fmp4->ts: ' + (e.message || e)); if (info.errs.length > 4) info.errs.shift(); });
+        function (e) { TT.log('fmp4->ts failed', e); });
     }
     hls = new Hls(cfg);
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
@@ -1910,22 +1867,7 @@ TT.checkService = function () {
       retries = 0;
       if (!video.paused || !pausedAt) setStatus('');
     });
-    startDiag(my, info);
-    hls.on(Hls.Events.BUFFER_CODECS, function (ev, data) {
-      var parts = [];
-      for (var k in data) {
-        if (data.hasOwnProperty(k) && data[k]) {
-          parts.push(k + '=' + (data[k].codec || '?') + ' ' + (data[k].container || ''));
-        }
-      }
-      info.mse = parts.join(' | ');
-    });
     hls.on(Hls.Events.ERROR, function (ev, data) {
-      if (my === session) {
-        info.errs.push((data.fatal ? 'FATAL ' : '') + data.details + (data.reason ? ' (' + data.reason + ')' : '') +
-          (data.error && data.error.message ? ' [' + data.error.message + ']' : ''));
-        if (info.errs.length > 4) info.errs.shift();
-      }
       if (!data.fatal || my !== session) return;
       TT.log('hls fatal error', data.type, data.details);
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 3) {
@@ -2072,7 +2014,6 @@ TT.checkService = function () {
       setVodClass(false);
       try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) { /* ignore */ }
       setStatus('');
-      $('diag').style.display = 'none';
     },
 
     // Set by the views: opens a channel page from the player's "Channel" button.

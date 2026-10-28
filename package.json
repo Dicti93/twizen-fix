@@ -1,6 +1,6 @@
 {
   "name": "@jjg0/twizen",
-  "version": "0.3.3-fix5",
+  "version": "0.3.3-fix6",
   "description": "Twitch player for Samsung Tizen TVs (TizenBrew module)",
   "packageType": "app",
   "appName": "Twizen (1080p-Fix)",

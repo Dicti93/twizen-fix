@@ -7,6 +7,7 @@
 > fix5: repackage fMP4 segments (Enhanced Broadcasting) as MPEG-TS before hls.js sees them
 > (`app/js` section `fmp4ts.js`). Tizen 3.0 TVs can't decode Twitch's muxed fMP4 with 1 MHz
 > 64-bit timestamps, but play the same H.264/AAC fine as TS.
+> fix6: diagnostics overlay removed again.
 
 # Twizen
 

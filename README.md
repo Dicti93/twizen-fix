@@ -8,6 +8,10 @@
 > (`app/js` section `fmp4ts.js`). Tizen 3.0 TVs can't decode Twitch's muxed fMP4 with 1 MHz
 > 64-bit timestamps, but play the same H.264/AAC fine as TS.
 > fix6: diagnostics overlay removed again.
+> 0.4.0: new Twitch-style German TV interface (home rows, followed channels in the sidebar,
+> channel pages, on-screen keyboard search, settings incl. stream language and quality), player
+> info bar with uptime and colour-key legend, chat badges; fMP4 VODs now play (init segment
+> proxied and repackaged as TS like live streams).
 
 # Twizen
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -15,15 +15,15 @@
         var box = document.getElementById('errors');
         if (!box) return;
         box.style.display = 'block';
-        box.textContent = 'Twizen problem (please report):\n' + lines.join('\n');
+        box.textContent = 'Twizen-Problem (bitte melden):\n' + lines.join('\n');
       }
       window.twzError = show;
-      window.twzScriptFailed = function (el) { show('Could not load ' + el.getAttribute('src')); };
+      window.twzScriptFailed = function (el) { show('Konnte ' + el.getAttribute('src') + ' nicht laden'); };
       window.onerror = function (msg, src, line, col) {
         show(msg + ' (' + String(src || '').split('/').pop() + ':' + line + ':' + (col || 0) + ')');
       };
       setTimeout(function () {
-        if (!window.TT || !window.TT.started) show('App did not start after 60 s. UA: ' + navigator.userAgent);
+        if (!window.TT || !window.TT.started) show('App ist nach 60 s nicht gestartet. UA: ' + navigator.userAgent);
       }, 60000);
     })();
   </script>
@@ -31,9 +31,9 @@
 <body>
   <div id="app">
     <nav id="sidebar">
-      <div class="logo"><span>Twi</span>zen</div>
+      <div class="logo"><i></i>Twizen</div>
     </nav>
-    <main id="main"><div id="boot" class="message boot">Loading Twizen…</div></main>
+    <main id="main"><div id="boot" class="message boot">Twizen wird geladen …</div></main>
   </div>
 
   <div id="player" style="display:none">
@@ -42,22 +42,31 @@
       <div id="player-status"></div>
       <div id="badges"></div>
       <div id="osd" class="osd">
-        <div class="osd-info">
-          <img id="osd-avatar" alt="">
+        <div class="osd-top">
+          <img id="osd-avatar" class="av" alt="">
           <div class="osd-text">
-            <div id="osd-name"></div>
+            <div class="osd-name-row"><span id="osd-name"></span><span class="pill live live-only">Live</span></div>
             <div id="osd-title"></div>
             <div id="osd-meta"></div>
           </div>
+          <div class="osd-stats live-only">
+            <div id="osd-viewers"></div>
+            <div id="osd-uptime"></div>
+          </div>
         </div>
-        <div id="osd-progress" class="osd-progress vod-only">
-          <div class="osd-track"><div id="osd-bar"></div></div>
-          <span id="osd-time"></span>
+        <div class="osd-bottom">
+          <div id="osd-progress" class="osd-progress vod-only">
+            <div class="osd-track"><div id="osd-bar"></div></div>
+            <span id="osd-time"></span>
+          </div>
+          <div class="osd-row">
+            <div id="osd-controls" class="osd-controls"></div>
+            <div id="osd-keys" class="osd-keys"></div>
+          </div>
         </div>
-        <div id="osd-controls" class="osd-controls"></div>
       </div>
     </div>
-    <aside id="chat"><div id="chat-list"></div></aside>
+    <aside id="chat"><div class="chat-h">Stream-Chat</div><div id="chat-list"></div></aside>
   </div>
 
   <div id="toast" class="toast"></div>

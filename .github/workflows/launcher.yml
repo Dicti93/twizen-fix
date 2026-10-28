@@ -28,6 +28,8 @@ jobs:
           ./tizen-installer --accept-license "${GITHUB_WORKSPACE}/tizen-studio"
           rm tizen-installer
 
+      # The profile file is written directly (like TizenBrew does): profiles created with
+      # "tizen security-profiles add" fail to package with "Invalid password".
       - name: Create signing profile
         env:
           PW: ${{ github.run_id }}Twz
@@ -37,9 +39,20 @@ jobs:
           "$T" certificate -a twizen -p "$PW" -c DE -n Twizen -f twizen-author
           AUTHOR=$(find "$HOME" "${GITHUB_WORKSPACE}" -name 'twizen-author.p12' 2>/dev/null | head -1)
           echo "author certificate: $AUTHOR"
-          "$T" security-profiles add -n TwizenOld -a "$AUTHOR" -p "$PW" \
-            -d "$CG/distributor/sdk-public/tizen-distributor-signer.p12" -dp tizenpkcs12passfordsigner
-          "$T" security-profiles list
+          PROFILES="${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
+          mkdir -p "$(dirname "$PROFILES")"
+          cat > "$PROFILES" <<EOF
+          <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+          <profiles active="TwizenOld" version="3.1">
+          <profile name="TwizenOld">
+          <profileitem ca="$CG/developer/tizen-developer-ca.cer" distributor="0" key="$AUTHOR" password="$PW" rootca=""/>
+          <profileitem ca="$CG/distributor/sdk-public/tizen-distributor-ca.cer" distributor="1" key="$CG/distributor/sdk-public/tizen-distributor-signer.p12" password="tizenpkcs12passfordsigner" rootca=""/>
+          <profileitem ca="" distributor="2" key="" password="" rootca=""/>
+          </profile>
+          </profiles>
+          EOF
+          sed -i 's/^ *//' "$PROFILES"
+          "$T" cli-config "profiles.path=$PROFILES"
 
       - name: Build and package
         run: |

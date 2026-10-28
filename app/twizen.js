@@ -1,9 +1,9 @@
-/* Twizen 0.4.1 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.4.2 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.4.1';
+TT.VERSION = '0.4.2';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -2216,6 +2216,11 @@ TT.checkService = function () {
           cycleCompressor();
           if (osdVisible) showOsd();
           return true;
+        case 'yellow': {
+          var owner = isVod ? current.owner : current && current.stream.broadcaster;
+          if (owner && owner.login && TT.player.onChannelPage) TT.player.onChannelPage(owner.login);
+          return true;
+        }
         case 'chup':
         case 'chdown':
           if (isVod) { seekBy(k === 'chup' ? 300 : -300); return true; }

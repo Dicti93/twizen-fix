@@ -11,13 +11,13 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   Seitenleiste, Kanalseiten, Suche mit Bildschirmtastatur.
 - **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Lautstärke-Ausgleich.
 - **Komfort:** Raids werden automatisch mitgemacht, Hinweis wenn gefolgte Kanäle live gehen, „Zuletzt gesehen“,
-  Zeitplan auf Kanalseiten, Qualität im Player umschaltbar, Emotes von 7TV, BTTV und FFZ.
+  Zeitplan auf Kanalseiten, Qualität im Player umschaltbar, Emotes von 7TV, BTTV und FFZ, Kanälen folgen und entfolgen.
 - **Vergangene Übertragungen** im fMP4-Format lassen sich abspielen.
 
 ## Installation
 
 1. [TizenBrew](https://github.com/reisxd/TizenBrew) auf dem Fernseher installieren.
-2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.4.3` eingeben.
+2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.4.4` eingeben.
 3. **Twizen DE** starten.
 
 Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen.

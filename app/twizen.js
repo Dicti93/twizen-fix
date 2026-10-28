@@ -1,9 +1,9 @@
-/* Twizen 0.4.3 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.4.4 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.4.3';
+TT.VERSION = '0.4.4';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -437,6 +437,30 @@ TT.checkService = function () {
     },
 
     followedChannels: helixFollowedChannels,
+
+    // Whether the signed-in user follows `login` (false when signed out).
+    isFollowing: function (login) {
+      if (!auth.current()) return Promise.resolve(false);
+      return gql('query($l:String!){ user(login:$l){ self{ follower{ followedAt } } } }', { l: login })
+        .then(function (d) { return !!(d.user && d.user.self && d.user.self.follower); });
+    },
+
+    // Follow (on = true) or unfollow a channel. Helix dropped this in 2023; GQL with the
+    // TV client's login still allows it.
+    setFollow: function (login, on) {
+      return api.userId(login).then(function (id) {
+        if (!id) throw new Error('Kanal nicht gefunden');
+        return on
+          ? gql('mutation($id:ID!){ followUser(input:{targetID:$id, disableNotifications:false}){ follow{ followedAt } error{ code } } }', { id: id })
+            .then(function (d) {
+              var r = d.followUser || {};
+              if (r.error && r.error.code) throw new Error(r.error.code);
+              return true;
+            })
+          : gql('mutation($id:ID!){ unfollowUser(input:{targetID:$id}){ follow{ followedAt } } }', { id: id })
+            .then(function () { return false; });
+      });
+    },
 
     // One page of all live channels, most viewers first: { items, cursor }. Signed in, the
     // official Helix API pages through everything; anonymous GQL only gives the top 30.
@@ -1827,8 +1851,37 @@ TT.checkService = function () {
     up: 'M12 4l6 7h-4v9h-4v-9H6z',
     down: 'M12 20l-6-7h4V4h4v9h4z',
     user: 'M12 3a4 4 0 110 8 4 4 0 010-8zm0 10c4.4 0 8 2 8 4.5V21H4v-3.5C4 15 7.6 13 12 13z',
-    hd: 'M3 5h18v14H3zM6 9v6h2v-2h2v2h2V9h-2v2H8V9zm8 0v6h3a2 2 0 002-2v-2a2 2 0 00-2-2zm2 2h1v2h-1z'
+    hd: 'M3 5h18v14H3zM6 9v6h2v-2h2v2h2V9h-2v2H8V9zm8 0v6h3a2 2 0 002-2v-2a2 2 0 00-2-2zm2 2h1v2h-1z',
+    heart: 'M12 21l-1.4-1.3C5.4 15 2 12 2 8.4 2 5.4 4.4 3 7.4 3c1.7 0 3.4.8 4.6 2.1C13.2 3.8 14.9 3 16.6 3 19.6 3 22 5.4 22 8.4c0 3.6-3.4 6.6-8.6 11.3z'
   };
+
+  // Follow state of the channel on screen: null = unknown / signed out.
+  var following = null, followBusy = false;
+
+  function loadFollowState() {
+    following = null;
+    var owner = current && (current.stream ? current.stream.broadcaster : current.owner);
+    if (!owner || !TT.api.auth.current()) return;
+    var my = session;
+    TT.api.isFollowing(owner.login).then(function (f) {
+      if (my !== session) return;
+      following = f;
+      if (osdVisible) renderControls();
+    }).catch(function () { /* button stays hidden */ });
+  }
+
+  function toggleFollow() {
+    var owner = current && (current.stream ? current.stream.broadcaster : current.owner);
+    if (!owner || following === null || followBusy) return;
+    followBusy = true;
+    TT.api.setFollow(owner.login, !following).then(function (f) {
+      following = f;
+      TT.toast(f ? 'Du folgst jetzt ' + (owner.displayName || owner.login) : 'Du folgst ' + (owner.displayName || owner.login) + ' nicht mehr');
+      if (TT.player.onFollowChange) TT.player.onFollowChange();
+    }, function (e) {
+      TT.toast('Folgen hat nicht geklappt: ' + (e.message || e));
+    }).then(function () { followBusy = false; if (osdVisible) renderControls(); });
+  }
 
   function levelName(l) {
     if (!l) return '?';
@@ -1868,6 +1921,7 @@ TT.checkService = function () {
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
     list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
+    if (following !== null) list.push({ icon: 'heart', label: following ? 'Folge ich' : 'Folgen', fn: toggleFollow });
     if (!isVod && playlist.length > 1) {
       list.push({ icon: 'up', label: 'Vorheriger', fn: function () { switchStream(-1); } });
       list.push({ icon: 'down', label: 'Nächster', fn: function () { switchStream(1); } });
@@ -2268,6 +2322,7 @@ TT.checkService = function () {
       TT.chat.open(stream.broadcaster.login);
       TT.recent.add(stream.broadcaster);
       startRaidWatch();
+      loadFollowState();
       // Refresh title/viewers in the OSD.
       TT.api.channel(stream.broadcaster.login).then(function (u) {
         if (!current || current.stream !== stream || !u || !u.stream) return;
@@ -2286,6 +2341,7 @@ TT.checkService = function () {
       current = { vod: vod, owner: owner };
       playlist = [];
       TT.recent.add(owner);
+      loadFollowState();
       setVodClass(true);
       fillOsd(vod.title, owner, [vod.game ? vod.game.displayName : '',
         vod.publishedAt ? new Date(vod.publishedAt).toLocaleDateString('de-DE') : ''].filter(Boolean).join('  ·  '));
@@ -2314,6 +2370,8 @@ TT.checkService = function () {
 
     // Set by the views: opens a channel page from the player's "Channel" button.
     onChannelPage: null,
+    // Set by the views: the followed list changed (follow / unfollow).
+    onFollowChange: null,
 
     // Returns true if the key was handled. `repeat` is true while a key is held down.
     key: function (k, repeat) {
@@ -2866,8 +2924,9 @@ TT.checkService = function () {
       refreshRecommended({});
       return;
     }
-    var liveP = TT.api.followedLive().catch(function () { return []; });
-    var allP = TT.api.followedChannels().catch(function () { return []; });
+    var failed = false;
+    var liveP = TT.api.followedLive().catch(function () { failed = true; return []; });
+    var allP = TT.api.followedChannels().catch(function () { failed = true; return []; });
     Promise.all([liveP, allP]).then(function (r) {
       var live = r[0].slice().sort(function (a, b) { return b.viewersCount - a.viewersCount; });
       var liveLogins = {};
@@ -2876,7 +2935,12 @@ TT.checkService = function () {
       TT.clear(followBox);
       live.forEach(function (s) { followBox.appendChild(followEntry(s.broadcaster, s, live)); });
       offline.forEach(function (c) { followBox.appendChild(followEntry(c, null)); });
-      if (!live.length && !offline.length) followBox.appendChild(TT.el('div', 'fol-login', 'Keine gefolgten Kanäle'));
+      if (failed) {
+        var retry = TT.el('div', 'fol-login', 'Gefolgte Kanäle konnten nicht geladen werden. OK = nochmal versuchen');
+        followBox.appendChild(TT.focusable(retry, refreshFollows));
+      } else if (!live.length && !offline.length) {
+        followBox.appendChild(TT.el('div', 'fol-login', 'Keine gefolgten Kanäle'));
+      }
       if (hadFocus) focusFirstIn(followBox);
       // "X ist jetzt live" for channels that went live since the last check (not on start-up).
       if (prevLive) {
@@ -2915,6 +2979,7 @@ TT.checkService = function () {
     home: function () {
       var el = section('');
       push('home', el);
+      if (followBox && followBox.firstChild) refreshFollows();
       var signedIn = !!TT.api.auth.current();
       var followedP = signedIn ? TT.api.followedLive().catch(function () { return []; }) : Promise.resolve([]);
       load(el, Promise.all([followedP, TT.api.topStreams()]), function (r) {
@@ -3058,11 +3123,31 @@ TT.checkService = function () {
         head.appendChild(info);
         el.appendChild(head);
         var watch = null;
+        var bar = TT.el('div', 'toolbar');
         if (u.stream) {
-          var bar = TT.el('div', 'toolbar');
           watch = button('▶  Live ansehen', function () { openPlayer(u.stream, [u.stream]); }, 'primary');
           bar.appendChild(watch);
-          el.appendChild(bar);
+        }
+        el.appendChild(bar);
+        // Follow / unfollow (signed in only).
+        if (TT.api.auth.current()) {
+          TT.api.isFollowing(u.login).then(function (f) {
+            var busy = false;
+            var fb = button(f ? '♥  Folge ich' : '♡  Folgen', function () {
+              if (busy) return;
+              busy = true;
+              TT.api.setFollow(u.login, !f).then(function (now) {
+                f = now;
+                fb.textContent = f ? '♥  Folge ich' : '♡  Folgen';
+                TT.toast(f ? 'Du folgst jetzt ' + u.displayName : 'Du folgst ' + u.displayName + ' nicht mehr');
+                refreshFollows();
+              }, function (e) {
+                TT.toast('Folgen hat nicht geklappt: ' + (e.message || e));
+              }).then(function () { busy = false; });
+            });
+            bar.appendChild(fb);
+            if (!watch && top() && top().el === el && !inSidebar()) TT.focus.set(fb);
+          }).catch(function () { /* no button */ });
         }
         // Stream schedule (if the channel has one), loaded alongside.
         var sched = TT.el('div');
@@ -3288,6 +3373,8 @@ TT.checkService = function () {
       lists.appendChild(intlBox);
       side.appendChild(lists);
       refreshFollows();
+      TT.player.onFollowChange = refreshFollows;
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshFollows(); });
       // Player's 'Channel' button: leave the player and show that channel's page
       // (or go back to it if we came from there).
       TT.player.onChannelPage = function (login) {

@@ -1,0 +1,42 @@
+{
+  "name": "@jjg0/twizen",
+  "version": "0.3.3-fix1",
+  "description": "Twitch player for Samsung Tizen TVs (TizenBrew module)",
+  "packageType": "app",
+  "appName": "Twizen (1080p-Fix)",
+  "appPath": "app/index.html",
+  "serviceFile": "service/service.js",
+  "keys": [
+    "MediaPlayPause",
+    "MediaPlay",
+    "MediaPause",
+    "MediaStop",
+    "ColorF0Red",
+    "ColorF1Green",
+    "ColorF2Yellow",
+    "ColorF3Blue",
+    "ChannelUp",
+    "ChannelDown",
+    "MediaRewind",
+    "MediaFastForward"
+  ],
+  "scripts": {
+    "build": "node tools/build.js",
+    "prepublishOnly": "node tools/build.js"
+  },
+  "files": [
+    "app/index.html",
+    "app/css",
+    "app/vendor",
+    "app/twizen.js",
+    "service",
+    "README.md"
+  ],
+  "keywords": [
+    "tizenbrew",
+    "tizen",
+    "twitch",
+    "adblock"
+  ],
+  "license": "MIT"
+}

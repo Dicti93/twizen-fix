@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Twizen</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    // On-screen error reporting: the TV has no console, so show problems in the UI.
+    window.twzT0 = Date.now();
+    (function () {
+      var lines = [];
+      function show(msg) {
+        lines.push(msg);
+        var box = document.getElementById('errors');
+        if (!box) return;
+        box.style.display = 'block';
+        box.textContent = 'Twizen problem (please report):\n' + lines.join('\n');
+      }
+      window.twzError = show;
+      window.twzScriptFailed = function (el) { show('Could not load ' + el.getAttribute('src')); };
+      window.onerror = function (msg, src, line, col) {
+        show(msg + ' (' + String(src || '').split('/').pop() + ':' + line + ':' + (col || 0) + ')');
+      };
+      setTimeout(function () {
+        if (!window.TT || !window.TT.started) show('App did not start after 60 s. UA: ' + navigator.userAgent);
+      }, 60000);
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar">
+      <div class="logo"><span>Twi</span>zen</div>
+    </nav>
+    <main id="main"><div id="boot" class="message boot">Loading Twizen…</div></main>
+  </div>
+
+  <div id="player" style="display:none">
+    <div id="video-wrap">
+      <video id="video"></video>
+      <div id="player-status"></div>
+      <div id="badges"></div>
+      <div id="osd" class="osd">
+        <div class="osd-info">
+          <img id="osd-avatar" alt="">
+          <div class="osd-text">
+            <div id="osd-name"></div>
+            <div id="osd-title"></div>
+            <div id="osd-meta"></div>
+          </div>
+        </div>
+        <div id="osd-progress" class="osd-progress vod-only">
+          <div class="osd-track"><div id="osd-bar"></div></div>
+          <span id="osd-time"></span>
+        </div>
+        <div id="osd-controls" class="osd-controls"></div>
+      </div>
+    </div>
+    <aside id="chat"><div id="chat-list"></div></aside>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <pre id="errors"></pre>
+
+  <!-- Built by tools/build.js from app/js. hls.js is loaded later, in the background. -->
+  <script src="twizen.js" onerror="twzScriptFailed(this)"></script>
+</body>
+</html>

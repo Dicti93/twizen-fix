@@ -29,10 +29,11 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 ## Installation
 
 1. [TizenBrew](https://github.com/reisxd/TizenBrew) auf dem Fernseher installieren.
-2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.5.3` eingeben.
+2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@0` eingeben.
 3. **Twizen DE** starten.
 
-Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen.
+Mit `@0` lädt TizenBrew immer die neueste Version 0.x, Updates kommen also von selbst (beim nächsten Start).
+Eine bestimmte Version lässt sich mit z. B. `@v0.5.4` festhalten.
 
 ## Fernbedienung
 

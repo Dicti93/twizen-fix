@@ -1,9 +1,9 @@
-/* Twizen 0.5.3 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.5.4 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.3';
+TT.VERSION = '0.5.4';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -4355,6 +4355,12 @@ TT.checkService = function () {
         if (!H.isSupported()) TT.toast('Dieser Fernseher unterstützt keine Media-Source-Wiedergabe', 8000);
       }, function (e) { if (window.twzError) twzError(e.message); });
     }, 1000);
+    // Installed as Dicti93/twizen-fix@0, new versions arrive on their own: say so once.
+    step('update notice', function () {
+      var last = TT.store.get('lastVersion', null);
+      if (last && last !== TT.VERSION) TT.toast('Twizen wurde auf ' + TT.VERSION + ' aktualisiert', 5000);
+      TT.store.set('lastVersion', TT.VERSION);
+    });
     TT.checkService().then(function (ok) {
       if (!ok) TT.toast('Der Twizen-Dienst läuft nicht. Stöbern geht, Abspielen nicht.', 8000);
     });

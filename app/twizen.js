@@ -1,9 +1,9 @@
-/* Twizen 0.5.0 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.5.1 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.0';
+TT.VERSION = '0.5.1';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -197,7 +197,7 @@ TT.checkService = function () {
   var SCOPES = 'user_read user:read:follows chat:read';
 
   var STREAM_FIELDS =
-    'id title viewersCount createdAt previewImageURL(width:356,height:200) ' +
+    'id title viewersCount createdAt contentClassificationLabels{ id } previewImageURL(width:356,height:200) ' +
     'broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName }';
 
   // ---- auth -------------------------------------------------------------
@@ -359,6 +359,7 @@ TT.checkService = function () {
           title: s.title,
           viewersCount: s.viewer_count,
           createdAt: s.started_at,
+          isMature: !!s.is_mature,
           previewImageURL: (s.thumbnail_url || '').replace('{width}', '356').replace('{height}', '200'),
           game: s.game_name ? { name: s.game_name, displayName: s.game_name } : null,
           broadcaster: { login: s.user_login, displayName: s.user_name, profileImageURL: pics[s.user_id] || '' }
@@ -394,12 +395,56 @@ TT.checkService = function () {
     auth: auth,
     gql: gql,
 
-    // Top live streams. lang: 'de', 'en' or 'all'; default is the Settings language ('de').
-    topStreams: function (lang) {
+    // Live streams in Twitch's own "recommended" order (or `sort`). lang: 'de', 'en' or 'all';
+    // default is the Settings language ('de').
+    topStreams: function (lang, sort) {
       lang = lang || TT.store.get('lang', 'de');
-      var opt = lang === 'all' ? '' : ', options:{languages:[' + lang.toUpperCase() + ']}';
-      return gql('query{ streams(first:30' + opt + '){ edges{ node{ ' + STREAM_FIELDS + ' } } } }')
+      var opt = 'sort:' + (sort || 'RELEVANCE') + (lang === 'all' ? '' : ', languages:[' + lang.toUpperCase() + ']');
+      return gql('query{ streams(first:30, options:{' + opt + '}){ edges{ node{ ' + STREAM_FIELDS + ' } } } }')
         .then(function (d) { return edgesToNodes(d.streams); });
+    },
+
+    // Live channels for the "Live-Kanäle" page. f: { lang, sort, game }. Returns a pager whose
+    // next() resolves { items, done }. Signed in + "most viewers" pages endlessly via Helix;
+    // a category gives up to 100; otherwise GQL pages of 30 (only signed in; anonymous GQL refuses page 2).
+    livePager: function (f) {
+      var cursor = null, done = false, first = true;
+      var langs = f.lang === 'all' ? null : f.lang;
+      function finish(items, next) {
+        cursor = next || null;
+        done = !cursor;
+        first = false;
+        return { items: items, done: done };
+      }
+      return {
+        next: function () {
+          if (done) return Promise.resolve({ items: [], done: true });
+          if (f.game) {
+            done = true;
+            return gql('query($n:String!){ game(name:$n){ streams(first:100, options:{sort:' + f.sort +
+              (langs ? ', languages:["' + langs.toUpperCase() + '"]' : '') + '}){ edges{ node{ ' + STREAM_FIELDS + ' } } } } }',
+              { n: f.game.name }).then(function (d) { return { items: d.game ? edgesToNodes(d.game.streams) : [], done: true }; });
+          }
+          if (f.sort === 'VIEWER_COUNT' && auth.current()) {
+            return helix('streams?first=100' + (langs ? '&language=' + langs : '') + (cursor ? '&after=' + encodeURIComponent(cursor) : ''))
+              .then(function (d) {
+                var next = d.pagination && d.pagination.cursor;
+                return helixStreams(d.data || []).then(function (items) { return finish(items, next); });
+              });
+          }
+          var opt = 'sort:' + f.sort + (langs ? ', languages:[' + langs.toUpperCase() + ']' : '');
+          return gql('query{ streams(first:30' + (cursor ? ', after:' + JSON.stringify(cursor) : '') + ', options:{' + opt + '}){ ' +
+            'edges{ cursor node{ ' + STREAM_FIELDS + ' } } } }').then(function (d) {
+            var edges = (d.streams && d.streams.edges) || [];
+            var last = edges.length ? edges[edges.length - 1].cursor : null;
+            // Without a login Twitch refuses further pages, so don't promise any.
+            return finish(edgesToNodes(d.streams), edges.length >= 20 && auth.current() ? last : null);
+          }, function (e) {
+            if (first) throw e;
+            return finish([], null); // Twitch refuses further pages (e.g. without login)
+          });
+        }
+      };
     },
 
     // Live status of several channels at once: [{ login, displayName, profileImageURL, stream }].
@@ -572,21 +617,6 @@ TT.checkService = function () {
           : gql('mutation($id:ID!){ unfollowUser(input:{targetID:$id}){ follow{ followedAt } } }', { id: id })
             .then(function () { return false; });
       });
-    },
-
-    // One page of all live channels, most viewers first: { items, cursor }. Signed in, the
-    // official Helix API pages through everything; anonymous GQL only gives the top 30.
-    liveStreamsPage: function (cursor) {
-      var de = TT.store.get('lang', 'de') === 'de';
-      if (auth.current()) {
-        return helix('streams?first=100' + (de ? '&language=de' : '') + (cursor ? '&after=' + encodeURIComponent(cursor) : ''))
-          .then(function (d) {
-            var next = d.pagination && d.pagination.cursor;
-            return helixStreams(d.data || []).then(function (items) { return { items: items, cursor: next || null }; });
-          });
-      }
-      if (cursor) return Promise.resolve({ items: [], cursor: null });
-      return api.topStreams().then(function (items) { return { items: items, cursor: null }; });
     },
 
     // Channel page: profile, live stream (if any) and recent videos.
@@ -3278,7 +3308,7 @@ TT.checkService = function () {
     return card;
   }
 
-  function categoryCard(g) {
+  function categoryCard(g, onPick) {
     var card = TT.el('div', 'card cat-card');
     var lift = TT.el('div', 'lift');
     var box = TT.el('div', 'box');
@@ -3289,7 +3319,7 @@ TT.checkService = function () {
     card.appendChild(lift);
     card.appendChild(TT.el('div', 'card-title', g.displayName || g.name));
     if (g.viewersCount) card.appendChild(TT.el('div', 'card-sub', TT.fmtViewers(g.viewersCount)));
-    return TT.focusable(card, function () { views.category(g); });
+    return TT.focusable(card, function () { if (onPick) onPick(); else views.category(g); });
   }
 
   // Round channel tile (offline channels, search results). c: { login, displayName, profileImageURL, stream? }
@@ -3415,6 +3445,14 @@ TT.checkService = function () {
       box.appendChild(row);
     });
   }
+
+  // "Live-Kanäle" filter, remembered: { lang, sort, game, size, mature }.
+  function liveFilter() {
+    var f = TT.store.get('liveFilter', null) || {};
+    return { lang: f.lang || TT.store.get('lang', 'de'), sort: f.sort || 'RELEVANCE', game: f.game || null,
+      size: f.size || 'all', mature: f.mature || 'all' };
+  }
+  function saveFilter(f) { TT.store.set('liveFilter', f); }
 
   function button(label, onSelect, cls) {
     return TT.focusable(TT.el('div', 'btn' + (cls ? ' ' + cls : ''), label), onSelect);
@@ -3568,6 +3606,8 @@ TT.checkService = function () {
     if (!recBox) return;
     skip = skip || {};
     TT.favorites.list().forEach(function (l) { skip[l] = 1; }); // already pinned at the top
+    // Twitch's own recommended order per language. (The browser's personal list isn't
+    // available to apps like this one, not even signed in.)
     function fill(box, lang) {
       var had = box.contains(TT.focus.get());
       return TT.api.topStreams(lang).then(function (top) {
@@ -3680,39 +3720,107 @@ TT.checkService = function () {
     },
 
     // All live channels as a grid; more load automatically near the end of the list.
+    // All live channels as a grid with filters (language, sort, category, size, 18+);
+    // more load automatically near the end of the list.
     live: function () {
-      var signedIn = !!TT.api.auth.current();
-      var de = TT.store.get('lang', 'de') === 'de';
-      var el = section('Live-Kanäle', (de ? 'Deutschsprachige Streams' : 'Alle Sprachen') + ', nach Zuschauern sortiert' +
-        (signedIn ? '' : ' · Melde dich an, um mehr als die Top 30 zu sehen'));
+      var el = section('Live-Kanäle');
       push('live', el);
-      var g = grid([]), cursor = null, loading = false, seen = {}, all = [];
-      function add(items) {
-        items.forEach(function (s) {
-          if (seen[s.id]) return;
-          seen[s.id] = 1;
-          all.push(s);
-          var card = streamCard(s, all);
-          card.onfocusin2 = function () { if (all.length - all.indexOf(s) <= 8) more(); };
-          g.appendChild(card);
+      var f = liveFilter();
+      var bar = TT.el('div', 'toolbar filters');
+      var note = TT.el('div', 'view-sub filter-note');
+      var body = TT.el('div');
+      el.appendChild(bar);
+      el.appendChild(note);
+      el.appendChild(body);
+
+      function option(key, opts) {
+        var b = button('', function () {
+          var i = 0;
+          opts.forEach(function (o, k) { if (o[0] === f[key]) i = k; });
+          f[key] = opts[(i + 1) % opts.length][0];
+          paint();
+          saveFilter(f);
+          reload();
         });
-        TT.lazy();
+        function paint() {
+          var o = opts.filter(function (x) { return x[0] === f[key]; })[0] || opts[0];
+          b.textContent = o[1];
+        }
+        paint();
+        bar.appendChild(b);
+        return b;
       }
-      function more() {
-        if (loading || !cursor) return;
-        loading = true;
-        TT.api.liveStreamsPage(cursor).then(function (r) {
-          cursor = r.cursor;
-          add(r.items);
-          loading = false;
-        }, function () { loading = false; });
+      var firstBtn = option('lang', [['de', 'Sprache: Deutsch'], ['en', 'Sprache: International'], ['all', 'Sprache: Alle']]);
+      option('sort', [['RELEVANCE', 'Sortierung: Empfohlen'], ['VIEWER_COUNT', 'Sortierung: Zuschauer ↓'],
+        ['VIEWER_COUNT_ASC', 'Sortierung: Zuschauer ↑'], ['RECENT', 'Sortierung: Neu gestartet']]);
+      var catBtn = button('', function () {
+        views.categories(function (g) {
+          f.game = g ? { name: g.name, displayName: g.displayName || g.name } : null;
+          paintCat();
+          saveFilter(f);
+          reload();
+        });
+      });
+      function paintCat() { catBtn.textContent = 'Kategorie: ' + (f.game ? f.game.displayName : 'Alle'); }
+      paintCat();
+      bar.appendChild(catBtn);
+      option('size', [['all', 'Größe: Alle'], ['s', 'Größe: Klein (unter 100)'], ['m', 'Größe: Mittel (100–1.000)'],
+        ['l', 'Größe: Groß (über 1.000)']]);
+      option('mature', [['all', '18+: Alle'], ['hide', '18+: Ausblenden'], ['only', '18+: Nur 18+']]);
+
+      var gen = 0;
+      function reload() {
+        var my = ++gen, pager = TT.api.livePager(f), loading = false, done = false, seen = {}, all = [];
+        var g = grid([]);
+        TT.clear(body);
+        body.appendChild(g);
+        note.textContent = 'Wird geladen …';
+        function matches(st) {
+          var v = st.viewersCount || 0;
+          if (f.size === 's' && v >= 100) return false;
+          if (f.size === 'm' && (v < 100 || v > 1000)) return false;
+          if (f.size === 'l' && v <= 1000) return false;
+          var mature = st.isMature || (st.contentClassificationLabels && st.contentClassificationLabels.length > 0);
+          if (f.mature === 'hide' && mature) return false;
+          if (f.mature === 'only' && !mature) return false;
+          return true;
+        }
+        // Loads pages until about 24 more matching channels are there (filters can skip many).
+        function more() {
+          if (loading || done) return;
+          loading = true;
+          var found = 0, pages = 0;
+          (function step() {
+            pager.next().then(function (r) {
+              if (my !== gen) return;
+              done = r.done;
+              pages++;
+              r.items.forEach(function (st) {
+                if (seen[st.id] || !matches(st)) return;
+                seen[st.id] = 1;
+                all.push(st);
+                found++;
+                var card = streamCard(st, all);
+                card.onfocusin2 = function () { if (all.length - all.indexOf(st) <= 8) more(); };
+                g.appendChild(card);
+              });
+              TT.lazy();
+              if (!done && found < 24 && pages < 15) return step();
+              loading = false;
+              note.textContent = all.length ? all.length + ' Kanäle' + (done ? '' : ' (weitere laden beim Runterscrollen)') +
+                (done && !TT.api.auth.current() && !f.game ? ' · Ohne Anmeldung zeigt Twitch höchstens 30' : '') :
+                'Keine Kanäle für diese Auswahl';
+            }, function (e) {
+              if (my !== gen) return;
+              loading = false;
+              note.textContent = 'Fehler: ' + (e.message || e);
+            });
+          })();
+        }
+        more();
       }
-      load(el, TT.api.liveStreamsPage(null), function (r) {
-        cursor = r.cursor;
-        el.appendChild(g);
-        add(r.items);
-        return g.querySelector('.focusable');
-      }, 'Gerade ist niemand live');
+      reload();
+      TT.focus.set(firstBtn);
     },
 
     // EPG-style week view of the schedules of your channels (favourites, followed, recently watched).
@@ -3752,11 +3860,20 @@ TT.checkService = function () {
       }, 'Keiner deiner Kanäle hat einen Zeitplan. Folge Kanälen oder markiere Favoriten.');
     },
 
-    categories: function () {
-      var el = section('Kategorien');
+    // pick(g): choose a category for a filter instead of opening it (g = null: all categories).
+    categories: function (pick) {
+      var el = section(pick ? 'Kategorie wählen' : 'Kategorien');
       push('categories', el);
+      if (pick) {
+        var bar = TT.el('div', 'toolbar');
+        bar.appendChild(button('Alle Kategorien', function () { pop(); pick(null); }, 'primary'));
+        el.appendChild(bar);
+      }
       load(el, TT.api.topCategories(), function (games) {
-        el.appendChild(grid(games.map(categoryCard), 'cats'));
+        el.appendChild(grid(games.map(function (g) {
+          return categoryCard(g, pick ? function () { pop(); pick(g); } : null);
+        }), 'cats'));
+        return pick ? el.querySelector('.toolbar .btn') : null;
       });
     },
 
@@ -4060,7 +4177,7 @@ TT.checkService = function () {
       lists.appendChild(TT.el('div', 'side-h', 'Gefolgte Kanäle'));
       followBox = TT.el('div', 'side-follows');
       lists.appendChild(followBox);
-      lists.appendChild(TT.el('div', 'side-h', 'Empfohlene Kanäle'));
+      lists.appendChild(TT.el('div', 'side-h', TT.store.get('lang', 'de') === 'de' ? 'Empfohlen auf Deutsch' : 'Empfohlene Kanäle'));
       recBox = TT.el('div', 'side-follows');
       lists.appendChild(recBox);
       lists.appendChild(TT.el('div', 'side-h', 'Beliebt international'));

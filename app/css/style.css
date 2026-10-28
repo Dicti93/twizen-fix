@@ -141,6 +141,11 @@ img { display: block; }
 .chan-status b { color: #ff8280; }
 .chan-title { color: #efeff1; margin-top: 0.2rem; }
 
+/* Live-Kanäle filters */
+.filters { flex-wrap: wrap; margin-bottom: 0.6rem; }
+.filters .btn { margin-bottom: 0.5rem; font-size: 0.9rem; }
+.filter-note { margin: 0 0 0.8rem; }
+
 /* watch progress on video cards */
 .watched { position: absolute; left: 0; right: 0; bottom: 0; height: 0.25rem; background: rgba(255, 255, 255, 0.3); }
 .watched i { display: block; height: 100%; background: #9147ff; }

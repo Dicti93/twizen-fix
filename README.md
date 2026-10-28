@@ -10,9 +10,10 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 - **Oberfläche auf Deutsch im Twitch-Stil:**
   - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, Weiterschauen, „Was habe ich verpasst?“ mit
     den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien)
-  - Seite „Live-Kanäle“ mit allen Live-Kanälen nach Zuschauern, 100 Kategorien mit Clips der Woche
+  - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
+    neu gestartet), 100 Kategorien mit Clips der Woche
   - TV-Programm: geplante Streams deiner Kanäle als Wochenübersicht
-  - Seitenleiste mit Favoriten, gefolgten Kanälen, empfohlenen deutschen und beliebten englischsprachigen Kanälen
+  - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch)
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
   Qualität umschaltbar, geringe Verzögerung, Chat mit Abzeichen und Emotes von 7TV, BTTV und FFZ,
@@ -27,7 +28,7 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 ## Installation
 
 1. [TizenBrew](https://github.com/reisxd/TizenBrew) auf dem Fernseher installieren.
-2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.5.0` eingeben.
+2. In TizenBrew den Module Manager öffnen, **Add GitHub module** wählen und `Dicti93/twizen-fix@v0.5.1` eingeben.
 3. **Twizen DE** starten.
 
 Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen.
@@ -49,7 +50,7 @@ Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen
 - Die App nutzt inoffizielle Twitch-Schnittstellen und blockt Werbung. Das verstößt gegen die Nutzungsbedingungen
   von Twitch.
 - Abo-Videos lassen sich nicht abspielen.
-- Ohne Anmeldung zeigt „Live-Kanäle“ nur die Top 30, und Folgen ist nicht möglich. Angemeldet wird über einen Code
+- Ohne Anmeldung zeigt „Live-Kanäle“ höchstens 30 Kanäle (in einer Kategorie 100), und Folgen ist nicht möglich. Angemeldet wird über einen Code
   unter *Einstellungen → Twitch-Konto*.
 - `app/twizen.js` ist die einzige Quelldatei. Der Code ist ES5 ohne CSS-Variablen, damit er auf Tizen 3.0
   (Chromium 47) läuft.

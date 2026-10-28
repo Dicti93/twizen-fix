@@ -7,12 +7,16 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 
 - **Läuft auf älteren Fernsehern (Tizen 3.0):** Streams und Videos im fMP4-Format („Enhanced Broadcasting“) werden vor
   der Wiedergabe in MPEG-TS umgepackt. Ohne das bleibt das Bild bei solchen Kanälen schwarz.
-- **Neue Oberfläche auf Deutsch:** Startseite mit Reihen, Seite „Live-Kanäle“, gefolgte und empfohlene Kanäle in der
-  Seitenleiste, Kanalseiten, Suche mit Bildschirmtastatur.
-- **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Lautstärke-Ausgleich.
-- **Komfort:** Raids werden automatisch mitgemacht, Hinweis wenn gefolgte Kanäle live gehen, „Zuletzt gesehen“,
-  Zeitplan auf Kanalseiten, Qualität im Player umschaltbar, Emotes von 7TV, BTTV und FFZ, Kanälen folgen und entfolgen.
-- **Vergangene Übertragungen** im fMP4-Format lassen sich abspielen.
+- **Oberfläche auf Deutsch im Twitch-Stil:**
+  - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, zuletzt gesehen, Empfehlungen, Kategorien)
+  - Seite „Live-Kanäle“ mit allen Live-Kanälen nach Zuschauern, 100 Kategorien
+  - Seitenleiste mit gefolgten Kanälen, empfohlenen deutschen und beliebten englischsprachigen Kanälen
+  - Kanalseiten mit Zeitplan und vergangenen Übertragungen, Suche mit Bildschirmtastatur
+- **Player:** Raids werden automatisch mitgemacht, Qualität umschaltbar, geringe Verzögerung, Chat mit Abzeichen und
+  Emotes von 7TV, BTTV und FFZ, Lautstärke-Ausgleich.
+- **Mit Twitch-Konto:** Kanälen folgen und entfolgen, gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.
+- **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Emotes.
+- **Flüssiger auf langsamen Fernsehern:** Bilder werden erst geladen, wenn sie ins Bild kommen, und in passender Größe.
 
 ## Installation
 
@@ -38,5 +42,7 @@ Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen
 - Die App nutzt inoffizielle Twitch-Schnittstellen und blockt Werbung. Das verstößt gegen die Nutzungsbedingungen
   von Twitch.
 - Abo-Videos lassen sich nicht abspielen.
+- Ohne Anmeldung zeigt „Live-Kanäle“ nur die Top 30, und Folgen ist nicht möglich. Angemeldet wird über einen Code
+  unter *Einstellungen → Twitch-Konto*.
 - `app/twizen.js` ist die einzige Quelldatei. Der Code ist ES5 ohne CSS-Variablen, damit er auf Tizen 3.0
   (Chromium 47) läuft.

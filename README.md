@@ -11,7 +11,7 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, Weiterschauen, „Was habe ich verpasst?“ mit
     den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien)
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
-    neu gestartet), 100 Kategorien mit Clips der Woche
+    neu gestartet), die Auswahl bleibt gespeichert; 100 Kategorien mit Clips der Woche
   - TV-Programm: geplante Streams deiner Kanäle als Wochenübersicht
   - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch)
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
@@ -50,7 +50,7 @@ Für ein Update das Modul entfernen und mit der neuen Version erneut hinzufügen
 - Die App nutzt inoffizielle Twitch-Schnittstellen und blockt Werbung. Das verstößt gegen die Nutzungsbedingungen
   von Twitch.
 - Abo-Videos lassen sich nicht abspielen.
-- Ohne Anmeldung zeigt „Live-Kanäle“ höchstens 30 Kanäle (in einer Kategorie 100), und Folgen ist nicht möglich. Angemeldet wird über einen Code
-  unter *Einstellungen → Twitch-Konto*.
+- Ohne Anmeldung zeigt „Live-Kanäle“ höchstens 30 Kanäle (in einer Kategorie 100), und Folgen ist nicht möglich.
+  Angemeldet wird über einen Code unter *Einstellungen → Twitch-Konto*.
 - `app/twizen.js` ist die einzige Quelldatei. Der Code ist ES5 ohne CSS-Variablen, damit er auf Tizen 3.0
   (Chromium 47) läuft.

@@ -38,6 +38,7 @@ img { display: block; }
 }
 .side-lists { flex: 1; overflow: hidden; margin: 0 -0.2rem; padding: 0 0.2rem; }
 .side-lists .side-h { margin-top: 1.2rem; }
+.side-lists .side-h:first-child { margin-top: 0.4rem; }
 .fol { display: flex; align-items: center; padding: 0.45rem 0.7rem; border-radius: 0.4rem; }
 .fol .av { width: 2rem; height: 2rem; margin-right: 0.7rem; }
 .fol-text { flex: 1; min-width: 0; }
@@ -139,6 +140,13 @@ img { display: block; }
 .chan-status { font-size: 1rem; color: #adadb8; }
 .chan-status b { color: #ff8280; }
 .chan-title { color: #efeff1; margin-top: 0.2rem; }
+
+/* schedule */
+.schedule { display: flex; flex-wrap: wrap; margin-bottom: 1.4rem; }
+.sched-item { width: 13rem; background: #18181b; border-radius: 0.4rem; padding: 0.7rem 0.9rem; margin: 0 0.8rem 0.8rem 0; }
+.sched-day { font-size: 0.85rem; font-weight: 700; color: #bf94ff; }
+.sched-time { font-size: 1rem; font-weight: 700; margin: 0.15rem 0; }
+.sched-title, .sched-cat { font-size: 0.8rem; color: #adadb8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- search ---- */
 .search-box {

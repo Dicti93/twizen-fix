@@ -1,9 +1,9 @@
-/* Twizen 0.4.2 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.4.3 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.4.2';
+TT.VERSION = '0.4.3';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -145,6 +145,17 @@ TT.loadHls = (function () {
   };
 })();
 
+// Recently watched channels (newest first), for the "Zuletzt gesehen" row.
+TT.recent = {
+  list: function () { return TT.store.get('recent', []) || []; },
+  add: function (c) {
+    if (!c || !c.login) return;
+    var list = TT.recent.list().filter(function (x) { return x.login !== c.login; });
+    list.unshift({ login: c.login, displayName: c.displayName || c.login, profileImageURL: c.profileImageURL || '' });
+    TT.store.set('recent', list.slice(0, 20));
+  }
+};
+
 TT.checkService = function () {
   return TT.http('GET', TT.PROXY + '/ping', { timeout: 3000 })
     .then(function () { return true; }, function () { return false; });
@@ -158,7 +169,7 @@ TT.checkService = function () {
   var SCOPES = 'user_read user:read:follows chat:read';
 
   var STREAM_FIELDS =
-    'id title viewersCount createdAt previewImageURL(width:440,height:248) ' +
+    'id title viewersCount createdAt previewImageURL(width:356,height:200) ' +
     'broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName }';
 
   // ---- auth -------------------------------------------------------------
@@ -320,7 +331,7 @@ TT.checkService = function () {
           title: s.title,
           viewersCount: s.viewer_count,
           createdAt: s.started_at,
-          previewImageURL: (s.thumbnail_url || '').replace('{width}', '440').replace('{height}', '248'),
+          previewImageURL: (s.thumbnail_url || '').replace('{width}', '356').replace('{height}', '200'),
           game: s.game_name ? { name: s.game_name, displayName: s.game_name } : null,
           broadcaster: { login: s.user_login, displayName: s.user_name, profileImageURL: pics[s.user_id] || '' }
         };
@@ -337,7 +348,7 @@ TT.checkService = function () {
   function gqlFollowedLive() {
     return gql('query{ currentUser{ followedLiveUsers(first:30){ edges{ node{ login displayName ' +
       'profileImageURL(width:70) stream{ id title viewersCount createdAt ' +
-      'previewImageURL(width:440,height:248) game{ name displayName } } } } } } }')
+      'previewImageURL(width:356,height:200) game{ name displayName } } } } } } }')
       .then(function (d) {
         if (!d.currentUser) throw new Error('GQL: not signed in');
         if (!d.currentUser.followedLiveUsers) throw new Error('GQL: followed list unavailable');
@@ -355,17 +366,50 @@ TT.checkService = function () {
     auth: auth,
     gql: gql,
 
-    // Language from Settings ('de' by default); 'all' means no filter.
-    topStreams: function () {
-      var de = TT.store.get('lang', 'de') === 'de';
-      return gql('query{ streams(first:30' + (de ? ', options:{languages:[DE]}' : '') + '){ edges{ node{ ' +
-        STREAM_FIELDS + ' } } } }')
+    // Top live streams. lang: 'de', 'en' or 'all'; default is the Settings language ('de').
+    topStreams: function (lang) {
+      lang = lang || TT.store.get('lang', 'de');
+      var opt = lang === 'all' ? '' : ', options:{languages:[' + lang.toUpperCase() + ']}';
+      return gql('query{ streams(first:30' + opt + '){ edges{ node{ ' + STREAM_FIELDS + ' } } } }')
         .then(function (d) { return edgesToNodes(d.streams); });
+    },
+
+    // Live status of several channels at once: [{ login, displayName, profileImageURL, stream }].
+    usersByLogin: function (logins) {
+      if (!logins.length) return Promise.resolve([]);
+      return gql('query($l:[String!]){ users(logins:$l){ login displayName profileImageURL(width:150) ' +
+        'stream{ ' + STREAM_FIELDS.replace(/broadcaster\{[^}]*\} /, '') + ' } } }', { l: logins })
+        .then(function (d) {
+          return (d.users || []).filter(Boolean).map(function (u) {
+            if (u.stream) u.stream.broadcaster = { login: u.login, displayName: u.displayName, profileImageURL: u.profileImageURL };
+            return u;
+          });
+        });
+    },
+
+    // Upcoming schedule segments: [{ startAt, endAt, title, categories }].
+    schedule: function (login) {
+      return gql('query($login:String!){ user(login:$login){ channel{ schedule{ segmentList(first:7){ edges{ node{ ' +
+        'startAt endAt title categories{ name displayName } } } } } } } }', { login: login })
+        .then(function (d) {
+          var sch = d.user && d.user.channel && d.user.channel.schedule;
+          return sch ? edgesToNodes(sch.segmentList) : [];
+        });
+    },
+
+    // Is this channel raiding someone right now? Resolves { live, target } (target: user or null).
+    raidState: function (login) {
+      return gql('query($login:String!){ user(login:$login){ stream{ id } raid{ targetChannel{ login displayName ' +
+        'profileImageURL(width:70) } } } }', { login: login })
+        .then(function (d) {
+          var u = d.user || {};
+          return { live: !!u.stream, target: u.raid && u.raid.targetChannel ? u.raid.targetChannel : null };
+        });
     },
 
     topCategories: function () {
       return gql('query{ games(first:100){ edges{ node{ name displayName ' +
-        'boxArtURL(width:285,height:380) viewersCount } } } }')
+        'boxArtURL(width:192,height:256) viewersCount } } } }')
         .then(function (d) { return edgesToNodes(d.games); });
     },
 
@@ -413,7 +457,7 @@ TT.checkService = function () {
     channelPage: function (login) {
       return gql('query($login:String!){ user(login:$login){ id login displayName ' +
         'profileImageURL(width:150) description stream{ id title viewersCount createdAt ' +
-        'previewImageURL(width:440,height:248) game{ name displayName } } ' +
+        'previewImageURL(width:356,height:200) game{ name displayName } } ' +
         'videos(first:30, sort:TIME){ edges{ node{ id title lengthSeconds viewCount publishedAt ' +
         'previewThumbnailURL(width:440,height:248) game{ name displayName } } } } } }', { login: login })
         .then(function (d) {
@@ -451,8 +495,8 @@ TT.checkService = function () {
     search: function (q) {
       return gql('query($q:String!){ searchFor(userQuery:$q, platform:"web"){ ' +
         'channels{ items{ login displayName profileImageURL(width:150) ' +
-        'stream{ id title viewersCount createdAt previewImageURL(width:440,height:248) game{ name displayName } } } } ' +
-        'games{ items{ name displayName boxArtURL(width:285,height:380) viewersCount } } } }', { q: q })
+        'stream{ id title viewersCount createdAt previewImageURL(width:356,height:200) game{ name displayName } } } } ' +
+        'games{ items{ name displayName boxArtURL(width:192,height:256) viewersCount } } } }', { q: q })
         .then(function (d) {
           var s = d.searchFor || {};
           return {
@@ -466,7 +510,7 @@ TT.checkService = function () {
     channel: function (login) {
       return gql('query($login:String!){ user(login:$login){ login displayName ' +
         'profileImageURL(width:70) stream{ id title viewersCount createdAt ' +
-        'previewImageURL(width:440,height:248) game{ name displayName } } } }', { login: login })
+        'previewImageURL(width:356,height:200) game{ name displayName } } } }', { login: login })
         .then(function (d) { return d.user; });
     },
 
@@ -990,7 +1034,7 @@ TT.checkService = function () {
 /* ---- chat.js ---- */
 ;// Read-only Twitch chat over anonymous IRC WebSocket.
 (function () {
-  var MAX_LINES = 60;
+  var MAX_LINES = 40; // more never fits on screen; fewer DOM nodes on slow TVs
   var MODES = ['off', 'side', 'overlay'];
   var ws = null, channel = null, box = null, list = null, reconnectTimer = null;
   var mode = TT.store.get('chatMode', 'side');
@@ -1011,23 +1055,48 @@ TT.checkService = function () {
     return map;
   }
 
+  // BTTV list ([{ id, code }]) -> name -> image URL.
+  function bttvMap(list) {
+    var map = {};
+    (list || []).forEach(function (e) { if (e && e.code && e.id) map[e.code] = 'https://cdn.betterttv.net/emote/' + e.id + '/1x'; });
+    return map;
+  }
+
+  // FFZ via BTTV's cache ([{ code, images: { '1x': url } }]) -> name -> image URL.
+  function ffzMap(list) {
+    var map = {};
+    (list || []).forEach(function (e) { if (e && e.code && e.images && e.images['1x']) map[e.code] = e.images['1x']; });
+    return map;
+  }
+
+  function merge(into, map) { for (var k in map) if (map.hasOwnProperty(k) && !into.hasOwnProperty(k)) into[k] = map[k]; }
+
+  function getJson(url) { return TT.http('GET', url).then(function (r) { return r.json(); }); }
+
+  // Third-party emotes (7TV, BTTV, FFZ): global sets once, channel sets per stream.
   function loadSevenTv(login) {
     var my = ++stvLoadId;
     stvChannel = {};
     if (!sevenTvOn) return;
     if (!stvGlobal) {
-      TT.http('GET', 'https://7tv.io/v3/emote-sets/global').then(function (r) {
-        stvGlobal = stvMap(r.json().emotes);
-      }).catch(function (e) { TT.log('7TV global emotes failed', e.message); });
+      stvGlobal = {};
+      getJson('https://7tv.io/v3/emote-sets/global').then(function (j) { merge(stvGlobal, stvMap(j.emotes)); }).catch(function () {});
+      getJson('https://api.betterttv.net/3/cached/emotes/global').then(function (j) { merge(stvGlobal, bttvMap(j)); }).catch(function () {});
+      getJson('https://api.betterttv.net/3/cached/frankerfacez/emotes/global').then(function (j) { merge(stvGlobal, ffzMap(j)); }).catch(function () {});
     }
     TT.api.userId(login).then(function (id) {
-      if (!id || my !== stvLoadId) return null;
-      return TT.http('GET', 'https://7tv.io/v3/users/twitch/' + id);
-    }).then(function (r) {
-      if (!r || my !== stvLoadId) return;
-      var set = r.json().emote_set;
-      stvChannel = stvMap(set && set.emotes);
-    }).catch(function () { /* channel has no 7TV set */ });
+      if (!id || my !== stvLoadId) return;
+      function add(map) { if (my === stvLoadId) merge(stvChannel, map); }
+      getJson('https://7tv.io/v3/users/twitch/' + id).then(function (j) {
+        add(stvMap(j.emote_set && j.emote_set.emotes));
+      }).catch(function () { /* channel has no 7TV set */ });
+      getJson('https://api.betterttv.net/3/cached/users/twitch/' + id).then(function (j) {
+        add(bttvMap((j.channelEmotes || []).concat(j.sharedEmotes || [])));
+      }).catch(function () { /* no BTTV emotes */ });
+      getJson('https://api.betterttv.net/3/cached/frankerfacez/users/twitch/' + id).then(function (j) {
+        add(ffzMap(j));
+      }).catch(function () { /* no FFZ emotes */ });
+    }).catch(function () {});
   }
 
   function sevenTvUrl(word) {
@@ -1757,8 +1826,36 @@ TT.checkService = function () {
     comp: 'M3 9h4l5-5v16l-5-5H3zM15 9h2v6h-2zM19 7h2v10h-2z',
     up: 'M12 4l6 7h-4v9h-4v-9H6z',
     down: 'M12 20l-6-7h4V4h4v9h4z',
-    user: 'M12 3a4 4 0 110 8 4 4 0 010-8zm0 10c4.4 0 8 2 8 4.5V21H4v-3.5C4 15 7.6 13 12 13z'
+    user: 'M12 3a4 4 0 110 8 4 4 0 010-8zm0 10c4.4 0 8 2 8 4.5V21H4v-3.5C4 15 7.6 13 12 13z',
+    hd: 'M3 5h18v14H3zM6 9v6h2v-2h2v2h2V9h-2v2H8V9zm8 0v6h3a2 2 0 002-2v-2a2 2 0 00-2-2zm2 2h1v2h-1z'
   };
+
+  function levelName(l) {
+    if (!l) return '?';
+    var fps = l.frameRate || (l.attrs && parseFloat(l.attrs['FRAME-RATE'])) || 0;
+    return (l.height || '?') + 'p' + (fps >= 50 ? '60' : '');
+  }
+
+  // "Auto (1080p60)" while hls.js chooses, otherwise the fixed level.
+  function qualityLabel() {
+    if (!hls || !hls.levels || !hls.levels.length) return 'Auto';
+    var cur = hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel];
+    return hls.autoLevelEnabled ? 'Auto' + (cur ? ' (' + levelName(cur) + ')' : '') : levelName(cur);
+  }
+
+  // Auto -> highest -> ... -> lowest -> Auto, for this stream only.
+  function cycleQuality() {
+    if (!hls || !hls.levels || !hls.levels.length) return;
+    var order = hls.levels.map(function (l, i) { return i; }).sort(function (a, b) {
+      var la = hls.levels[a], lb = hls.levels[b];
+      return (lb.height - la.height) || ((lb.bitrate || 0) - (la.bitrate || 0));
+    });
+    var opts = [-1].concat(order);
+    var now = hls.autoLevelEnabled ? -1 : hls.currentLevel;
+    var next = opts[(opts.indexOf(now) + 1) % opts.length];
+    hls.currentLevel = next;
+    TT.toast('Qualität: ' + (next < 0 ? 'Automatisch' : levelName(hls.levels[next])));
+  }
 
   function controlList() {
     var isVod = !!(current && current.vod);
@@ -1770,6 +1867,7 @@ TT.checkService = function () {
       list.push({ icon: 'chat', label: 'Chat: ' + TT.chat.label(), fn: function () { TT.chat.cycle(); } });
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
+    list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
     if (!isVod && playlist.length > 1) {
       list.push({ icon: 'up', label: 'Vorheriger', fn: function () { switchStream(-1); } });
       list.push({ icon: 'down', label: 'Nächster', fn: function () { switchStream(1); } });
@@ -1983,8 +2081,9 @@ TT.checkService = function () {
     if (isVod) vodMaps = {};
     var cfg = {
       pLoader: makePlaylistLoader(loaderCtrl),
-      liveSyncDurationCount: 3,
-      liveMaxLatencyDurationCount: 10,
+      // Low latency stays ~2 segments behind live; 'normal' gives slow TVs more buffer.
+      liveSyncDurationCount: TT.store.get('latency', 'low') === 'low' ? 2 : 3,
+      liveMaxLatencyDurationCount: TT.store.get('latency', 'low') === 'low' ? 6 : 10,
       maxBufferLength: isVod ? 30 : 20,
       backBufferLength: 10,
       enableWorker: true,
@@ -2026,7 +2125,12 @@ TT.checkService = function () {
         return;
       }
       var offline = !isVod && data.response && data.response.code === 404;
-      if (offline) { setStatus('Der Stream ist offline'); destroyHls(); return; }
+      if (offline) {
+        setStatus('Der Stream ist offline');
+        destroyHls();
+        if (!isVod) checkRaid(true);
+        return;
+      }
       if (retries < 4) {
         retries++;
         setStatus('Verbinde neu …');
@@ -2102,6 +2206,42 @@ TT.checkService = function () {
     showOsd();
   }
 
+  // ---- raids ---------------------------------------------------------------------
+  // While a live stream plays, check every 20 s whether the channel is raiding. When the
+  // stream then ends (or Twitch already took it offline), switch to the raid target.
+  var raidTimer = null, raidTarget = null;
+
+  function stopRaidWatch() { clearInterval(raidTimer); raidTimer = null; raidTarget = null; }
+
+  function checkRaid(ended) {
+    if (!current || !current.stream) return;
+    var login = current.stream.broadcaster.login, my = session;
+    TT.api.raidState(login).then(function (r) {
+      if (my !== session) return;
+      if (r.target && (!raidTarget || raidTarget.login !== r.target.login)) {
+        raidTarget = r.target;
+        TT.toast('Raid zu ' + (r.target.displayName || r.target.login) + ' …', 6000);
+      }
+      if ((ended || !r.live) && raidTarget) followRaid();
+    }).catch(function () { /* try again next time */ });
+  }
+
+  function followRaid() {
+    var t = raidTarget;
+    stopRaidWatch();
+    TT.api.channel(t.login).then(function (u) {
+      if (!u || !u.stream) { setStatus('Der Stream ist offline'); return; }
+      u.stream.broadcaster = { login: u.login, displayName: u.displayName, profileImageURL: u.profileImageURL };
+      TT.toast('Raid: weiter zu ' + (u.displayName || u.login), 5000);
+      TT.player.open(u.stream, [u.stream]);
+    }).catch(function () { setStatus('Der Stream ist offline'); });
+  }
+
+  function startRaidWatch() {
+    stopRaidWatch();
+    raidTimer = setInterval(function () { checkRaid(false); }, 20000);
+  }
+
   function setVodClass(isVod) {
     var p = $('player');
     p.className = p.className.replace(/\bis-vod\b/g, '').trim() + (isVod ? ' is-vod' : '');
@@ -2126,6 +2266,8 @@ TT.checkService = function () {
       updateBadges();
       play();
       TT.chat.open(stream.broadcaster.login);
+      TT.recent.add(stream.broadcaster);
+      startRaidWatch();
       // Refresh title/viewers in the OSD.
       TT.api.channel(stream.broadcaster.login).then(function (u) {
         if (!current || current.stream !== stream || !u || !u.stream) return;
@@ -2140,8 +2282,10 @@ TT.checkService = function () {
       hideOsd();
       cancelScrub();
       TT.chat.close();
+      stopRaidWatch();
       current = { vod: vod, owner: owner };
       playlist = [];
+      TT.recent.add(owner);
       setVodClass(true);
       fillOsd(vod.title, owner, [vod.game ? vod.game.displayName : '',
         vod.publishedAt ? new Date(vod.publishedAt).toLocaleDateString('de-DE') : ''].filter(Boolean).join('  ·  '));
@@ -2153,6 +2297,7 @@ TT.checkService = function () {
     },
 
     close: function () {
+      stopRaidWatch();
       cancelScrub();
       hideOsd();
       savePos();
@@ -2266,10 +2411,15 @@ TT.checkService = function () {
     return r.width > 0 && r.height > 0;
   }
 
+  // The scope can be one element or a list (sidebar + current page), so hidden pages
+  // further down the stack aren't measured on every key press.
   function candidates() {
-    var all = scopeFn().querySelectorAll('.focusable');
-    var out = [];
-    for (var i = 0; i < all.length; i++) if (visible(all[i])) out.push(all[i]);
+    var scope = scopeFn(), roots = scope instanceof Array ? scope : [scope], out = [];
+    for (var r = 0; r < roots.length; r++) {
+      if (!roots[r]) continue;
+      var all = roots[r].querySelectorAll('.focusable');
+      for (var i = 0; i < all.length; i++) if (visible(all[i])) out.push(all[i]);
+    }
     return out;
   }
 
@@ -2303,8 +2453,25 @@ TT.checkService = function () {
     current = el;
     el.classList.add('focused');
     reveal(el);
+    TT.lazy();
     if (el.onfocusin2) el.onfocusin2();
   }
+
+  // Pictures (img[data-src]) load only when they come near the screen. Tizen 3.0 has no
+  // IntersectionObserver, but all scrolling here follows the focus, so checking after each
+  // focus change (and after content is added) is enough.
+  TT.lazy = function () {
+    var imgs = document.querySelectorAll('img[data-src]');
+    var H = window.innerHeight, W = window.innerWidth;
+    for (var i = 0; i < imgs.length; i++) {
+      var r = imgs[i].getBoundingClientRect();
+      if (!r.width && !r.height) continue; // hidden page
+      if (r.bottom > -H * 0.5 && r.top < H * 1.5 && r.right > -W * 0.3 && r.left < W * 1.3) {
+        imgs[i].src = imgs[i].getAttribute('data-src');
+        imgs[i].removeAttribute('data-src');
+      }
+    }
+  };
 
   // Overlap of two 1-D ranges (0 if none).
   function overlap(a1, a2, b1, b2) {
@@ -2372,7 +2539,7 @@ TT.checkService = function () {
 (function () {
   var main, stack = []; // entries: { name, el, lastFocus, onLeave }
   var sideItems = {};
-  var followBox = null, followTimer = null, recBox = null;
+  var followBox = null, followTimer = null, recBox = null, intlBox = null, prevLive = null;
   var focusContent = false; // set when a page is opened from the sidebar menu
 
   var NAV = [
@@ -2459,10 +2626,11 @@ TT.checkService = function () {
   // Broken or missing pictures leave the grey placeholder instead of a broken-image icon.
   function hideBroken(img) { img.onerror = function () { img.style.visibility = 'hidden'; }; return img; }
 
+  // Sets the picture lazily (see TT.lazy); call TT.lazy() after adding content.
+  function lazySrc(img, url) { if (url) img.setAttribute('data-src', url); return img; }
+
   function avatar(url, cls) {
-    var img = hideBroken(TT.el('img', 'av' + (cls ? ' ' + cls : '')));
-    if (url) img.src = url;
-    return img;
+    return lazySrc(hideBroken(TT.el('img', 'av' + (cls ? ' ' + cls : ''))), url);
   }
 
   // Row heading with the first part in Twitch purple: heading('Live-Kanäle', ', denen du folgst').
@@ -2495,7 +2663,7 @@ TT.checkService = function () {
     var lift = TT.el('div', 'lift');
     var thumb = TT.el('div', 'thumb');
     var img = hideBroken(TT.el('img'));
-    img.src = (s.previewImageURL || '') + (s.previewImageURL ? '?t=' + Math.floor(Date.now() / 300000) : '');
+    lazySrc(img, s.previewImageURL ? s.previewImageURL + '?t=' + Math.floor(Date.now() / 300000) : '');
     thumb.appendChild(img);
     thumb.appendChild(TT.el('span', 'pill live', 'Live'));
     thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtViewers(s.viewersCount)));
@@ -2525,7 +2693,7 @@ TT.checkService = function () {
     var lift = TT.el('div', 'lift');
     var thumb = TT.el('div', 'thumb');
     var img = hideBroken(TT.el('img'));
-    img.src = v.previewThumbnailURL || '';
+    lazySrc(img, v.previewThumbnailURL);
     thumb.appendChild(img);
     if (v.publishedAt) thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtAgo(v.publishedAt)));
     thumb.appendChild(TT.el('span', 'pill dur', fmtDuration(v.lengthSeconds || 0)));
@@ -2544,7 +2712,7 @@ TT.checkService = function () {
     var lift = TT.el('div', 'lift');
     var box = TT.el('div', 'box');
     var img = hideBroken(TT.el('img'));
-    img.src = g.boxArtURL || '';
+    lazySrc(img, g.boxArtURL);
     box.appendChild(img);
     lift.appendChild(box);
     card.appendChild(lift);
@@ -2554,7 +2722,7 @@ TT.checkService = function () {
   }
 
   // Round channel tile (offline channels, search results). c: { login, displayName, profileImageURL, stream? }
-  function channelTile(c) {
+  function channelTile(c, playIfLive) {
     var card = TT.el('div', 'card chan-tile' + (c.stream ? ' is-live' : ''));
     var ring = TT.el('div', 'ring');
     ring.appendChild(avatar(c.profileImageURL));
@@ -2562,7 +2730,9 @@ TT.checkService = function () {
     card.appendChild(TT.el('div', 'card-title', c.displayName || c.login));
     card.appendChild(TT.el('div', 'card-sub' + (c.stream ? ' live-text' : ''),
       c.stream ? 'Live · ' + (c.stream.game ? c.stream.game.displayName : TT.fmtViewers(c.stream.viewersCount)) : 'Offline'));
-    return TT.focusable(card, function () { views.channel(c.login); });
+    return TT.focusable(card, function () {
+      if (playIfLive && c.stream) openPlayer(c.stream, [c.stream]); else views.channel(c.login);
+    });
   }
 
   function hero(s, list) {
@@ -2570,7 +2740,7 @@ TT.checkService = function () {
     var card = TT.el('div', 'hero');
     var thumb = TT.el('div', 'thumb');
     var img = hideBroken(TT.el('img'));
-    img.src = (s.previewImageURL || '').replace('440x248', '880x496') + '?t=' + Math.floor(Date.now() / 300000);
+    img.src = (s.previewImageURL || '').replace('356x200', '712x400') + '?t=' + Math.floor(Date.now() / 300000);
     thumb.appendChild(img);
     thumb.appendChild(TT.el('span', 'pill live', 'Live'));
     thumb.appendChild(TT.el('span', 'pill viewers', TT.fmtViewers(s.viewersCount)));
@@ -2590,6 +2760,26 @@ TT.checkService = function () {
     TT.focusable(card, function () { openPlayer(s, list); });
     card.onyellow = function () { views.channel(b.login); };
     return card;
+  }
+
+  var DAYS = ['So.', 'Mo.', 'Di.', 'Mi.', 'Do.', 'Fr.', 'Sa.'];
+  function two(n) { return (n < 10 ? '0' : '') + n; }
+
+  // One schedule entry: "Heute · 13:30–20:00 Uhr", title, category.
+  function scheduleItem(seg) {
+    var a = new Date(seg.startAt), e = seg.endAt ? new Date(seg.endAt) : null;
+    var today = new Date(), tomorrow = new Date(Date.now() + 86400000);
+    function same(x, y) { return x.toDateString() === y.toDateString(); }
+    var day = same(a, today) ? 'Heute' : same(a, tomorrow) ? 'Morgen' :
+      DAYS[a.getDay()] + ' ' + two(a.getDate()) + '.' + two(a.getMonth() + 1) + '.';
+    var item = TT.el('div', 'sched-item');
+    item.appendChild(TT.el('div', 'sched-day', day));
+    item.appendChild(TT.el('div', 'sched-time', two(a.getHours()) + ':' + two(a.getMinutes()) +
+      (e ? '–' + two(e.getHours()) + ':' + two(e.getMinutes()) : '') + ' Uhr'));
+    if (seg.title) item.appendChild(TT.el('div', 'sched-title', seg.title));
+    var cat = seg.categories && seg.categories[0];
+    if (cat) item.appendChild(TT.el('div', 'sched-cat', cat.displayName || cat.name));
+    return item;
   }
 
   function button(label, onSelect, cls) {
@@ -2617,6 +2807,7 @@ TT.checkService = function () {
       var empty = !data || data.length === 0;
       message(el, empty ? (emptyText || 'Hier gibt es nichts') : '');
       var target = empty ? null : render(data);
+      TT.lazy();
       // Move focus into the new content unless the user is browsing the sidebar.
       if (top() && top().el === el && (focusContent || !inSidebar())) {
         focusContent = false;
@@ -2687,6 +2878,14 @@ TT.checkService = function () {
       offline.forEach(function (c) { followBox.appendChild(followEntry(c, null)); });
       if (!live.length && !offline.length) followBox.appendChild(TT.el('div', 'fol-login', 'Keine gefolgten Kanäle'));
       if (hadFocus) focusFirstIn(followBox);
+      // "X ist jetzt live" for channels that went live since the last check (not on start-up).
+      if (prevLive) {
+        var fresh = live.filter(function (s) { return !prevLive[s.broadcaster.login]; })
+          .map(function (s) { return s.broadcaster.displayName || s.broadcaster.login; });
+        if (fresh.length) TT.toast(fresh.join(', ') + (fresh.length > 1 ? ' sind' : ' ist') + ' jetzt live', 6000);
+      }
+      prevLive = liveLogins;
+      TT.lazy();
       refreshRecommended(liveLogins);
     });
   }
@@ -2696,13 +2895,19 @@ TT.checkService = function () {
   function refreshRecommended(skip) {
     if (!recBox) return;
     skip = skip || {};
-    var hadFocus = recBox.contains(TT.focus.get());
-    TT.api.topStreams().then(function (top) {
-      var list = top.filter(function (s) { return !skip[s.broadcaster.login]; }).slice(0, 10);
-      TT.clear(recBox);
-      list.forEach(function (s) { recBox.appendChild(followEntry(s.broadcaster, s, list)); });
-      if (hadFocus) focusFirstIn(recBox);
-    }).catch(function () { /* keep the old list */ });
+    function fill(box, lang) {
+      var had = box.contains(TT.focus.get());
+      return TT.api.topStreams(lang).then(function (top) {
+        var list = top.filter(function (s) { return !skip[s.broadcaster.login]; }).slice(0, 10);
+        TT.clear(box);
+        list.forEach(function (s) { box.appendChild(followEntry(s.broadcaster, s, list)); });
+        if (had) focusFirstIn(box);
+        TT.lazy();
+      }).catch(function () { /* keep the old list */ });
+    }
+    fill(recBox);
+    // English-language channels worldwide, by viewers.
+    if (intlBox) fill(intlBox, 'en');
   }
 
   // ---- screens ---------------------------------------------------------------
@@ -2725,6 +2930,20 @@ TT.checkService = function () {
           el.appendChild(carousel('Live-Kanäle', ', denen du folgst',
             followed.map(function (s) { return streamCard(s, followed); })));
         }
+        // Recently watched channels (live ones play directly), loaded alongside.
+        var recentSlot = TT.el('div');
+        el.appendChild(recentSlot);
+        var logins = TT.recent.list().map(function (c) { return c.login; });
+        if (logins.length) {
+          TT.api.usersByLogin(logins).then(function (users) {
+            var byLogin = {};
+            users.forEach(function (u) { byLogin[u.login] = u; });
+            var tiles = logins.map(function (l) { return byLogin[l]; }).filter(Boolean)
+              .map(function (u) { return channelTile(u, true); });
+            if (tiles.length) recentSlot.appendChild(carousel('Zuletzt', ' gesehen', tiles));
+            TT.lazy();
+          }).catch(function () { /* optional row */ });
+        }
         var rec = top.filter(function (s) { return s !== featured; });
         if (rec.length) {
           el.appendChild(carousel('Empfohlene', ' Live-Kanäle', rec.map(function (s) { return streamCard(s, rec); })));
@@ -2733,6 +2952,7 @@ TT.checkService = function () {
         el.appendChild(cats);
         TT.api.topCategories().then(function (games) {
           if (games.length) cats.appendChild(carousel('Kategorien', ', die dir gefallen könnten', games.slice(0, 20).map(categoryCard)));
+          TT.lazy();
         }).catch(function () { /* the rest of the page still works */ });
         return first;
       }, 'Gerade ist niemand live');
@@ -2780,6 +3000,7 @@ TT.checkService = function () {
           card.onfocusin2 = function () { if (all.length - all.indexOf(s) <= 8) more(); };
           g.appendChild(card);
         });
+        TT.lazy();
       }
       function more() {
         if (loading || !cursor) return;
@@ -2843,6 +3064,16 @@ TT.checkService = function () {
           bar.appendChild(watch);
           el.appendChild(bar);
         }
+        // Stream schedule (if the channel has one), loaded alongside.
+        var sched = TT.el('div');
+        el.appendChild(sched);
+        TT.api.schedule(login).then(function (segs) {
+          if (!segs.length) return;
+          sched.appendChild(heading('Zeitplan', ''));
+          var list = TT.el('div', 'schedule');
+          segs.forEach(function (seg) { list.appendChild(scheduleItem(seg)); });
+          sched.appendChild(list);
+        }).catch(function () { /* no schedule */ });
         el.appendChild(heading('Vergangene', ' Übertragungen'));
         if (!u.videoList.length) el.appendChild(TT.el('div', 'message', 'Keine Videos vorhanden'));
         else el.appendChild(grid(u.videoList.map(function (v) { return videoCard(v, owner); })));
@@ -2895,7 +3126,10 @@ TT.checkService = function () {
           var q = TT.store.get('quality', 'auto');
           TT.store.set('quality', Q[(Q.indexOf(q) + 1) % Q.length]);
         });
-      row('7TV-Emotes im Chat', 'Ausschalten, falls der Chat die Wiedergabe ruckeln lässt',
+      row('Verzögerung', 'Gering: näher am Live-Geschehen. Normal: mehr Puffer, falls es ruckelt',
+        function () { return TT.store.get('latency', 'low') === 'low' ? 'Gering' : 'Normal'; },
+        function () { TT.store.set('latency', TT.store.get('latency', 'low') === 'low' ? 'normal' : 'low'); });
+      row('Emotes im Chat', '7TV, BTTV und FFZ. Ausschalten, falls der Chat die Wiedergabe ruckeln lässt',
         function () { return TT.chat.sevenTvEnabled() ? 'An' : 'Aus'; },
         function () { TT.chat.setSevenTv(!TT.chat.sevenTvEnabled()); });
       el.appendChild(TT.el('div', 'about', 'Twizen ' + TT.VERSION + ' · Werbeblocker aktiv · fMP4→TS für ältere Fernseher'));
@@ -2937,6 +3171,7 @@ TT.checkService = function () {
           if (chans.length) results.appendChild(carousel('Kanäle', '', chans.map(channelTile)));
           if (r.games.length) results.appendChild(carousel('Kategorien', '', r.games.map(categoryCard)));
           if (!chans.length && !r.games.length) message(results, 'Keine Treffer für „' + q + '“');
+          TT.lazy();
         }, function (err) {
           message(results, 'Fehler: ' + (err.message || err));
         });
@@ -3041,13 +3276,16 @@ TT.checkService = function () {
         }));
       });
       side.appendChild(nav);
-      side.appendChild(TT.el('div', 'side-h', 'Gefolgte Kanäle'));
       var lists = TT.el('div', 'side-lists');
+      lists.appendChild(TT.el('div', 'side-h', 'Gefolgte Kanäle'));
       followBox = TT.el('div', 'side-follows');
       lists.appendChild(followBox);
       lists.appendChild(TT.el('div', 'side-h', 'Empfohlene Kanäle'));
       recBox = TT.el('div', 'side-follows');
       lists.appendChild(recBox);
+      lists.appendChild(TT.el('div', 'side-h', 'Beliebt international'));
+      intlBox = TT.el('div', 'side-follows');
+      lists.appendChild(intlBox);
       side.appendChild(lists);
       refreshFollows();
       // Player's 'Channel' button: leave the player and show that channel's page
@@ -3059,7 +3297,7 @@ TT.checkService = function () {
       };
       TT.focus.setScope(function () {
         var t = top();
-        return t && t.player ? t.el : document.getElementById('app');
+        return t && t.player ? t.el : [side, t ? t.el : null];
       });
       views.home();
     },

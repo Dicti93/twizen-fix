@@ -12,6 +12,8 @@
 > channel pages, on-screen keyboard search, settings incl. stream language and quality), player
 > info bar with uptime and colour-key legend, chat badges; fMP4 VODs now play (init segment
 > proxied and repackaged as TS like live streams).
+> 0.4.1: "Live-Kanäle" grid of all live channels (endless when signed in), 100 categories and up
+> to 100 streams per category, recommended channels in the sidebar, carousels step card by card.
 
 # Twizen
 

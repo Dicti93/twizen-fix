@@ -1,9 +1,9 @@
-/* Twizen 0.4.0 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
+/* Twizen 0.4.1 (fork of Twizen 0.3.3; app/js sources are not published, edit this file). */
 /* ---- core.js ---- */
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.4.0';
+TT.VERSION = '0.4.1';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -310,26 +310,28 @@ TT.checkService = function () {
     });
   }
 
+  // Helix stream objects -> the app's stream shape (with profile pictures).
+  function helixStreams(streams) {
+    if (!streams.length) return Promise.resolve([]);
+    return helixPictures(streams.map(function (s) { return s.user_id; })).then(function (pics) {
+      return streams.map(function (s) {
+        return {
+          id: s.id,
+          title: s.title,
+          viewersCount: s.viewer_count,
+          createdAt: s.started_at,
+          previewImageURL: (s.thumbnail_url || '').replace('{width}', '440').replace('{height}', '248'),
+          game: s.game_name ? { name: s.game_name, displayName: s.game_name } : null,
+          broadcaster: { login: s.user_login, displayName: s.user_name, profileImageURL: pics[s.user_id] || '' }
+        };
+      });
+    });
+  }
+
   function helixFollowedLive() {
     return myUserId().then(function (id) {
       return helix('streams/followed?first=100&user_id=' + id);
-    }).then(function (d) {
-      var streams = d.data || [];
-      if (!streams.length) return [];
-      return helixPictures(streams.map(function (s) { return s.user_id; })).then(function (pics) {
-        return streams.map(function (s) {
-          return {
-            id: s.id,
-            title: s.title,
-            viewersCount: s.viewer_count,
-            createdAt: s.started_at,
-            previewImageURL: (s.thumbnail_url || '').replace('{width}', '440').replace('{height}', '248'),
-            game: s.game_name ? { name: s.game_name, displayName: s.game_name } : null,
-            broadcaster: { login: s.user_login, displayName: s.user_name, profileImageURL: pics[s.user_id] || '' }
-          };
-        });
-      });
-    });
+    }).then(function (d) { return helixStreams(d.data || []); });
   }
 
   function gqlFollowedLive() {
@@ -362,7 +364,7 @@ TT.checkService = function () {
     },
 
     topCategories: function () {
-      return gql('query{ games(first:30){ edges{ node{ name displayName ' +
+      return gql('query{ games(first:100){ edges{ node{ name displayName ' +
         'boxArtURL(width:285,height:380) viewersCount } } } }')
         .then(function (d) { return edgesToNodes(d.games); });
     },
@@ -370,7 +372,7 @@ TT.checkService = function () {
     // German streams first if that's the setting; falls back to all languages when there are none.
     categoryStreams: function (name) {
       function query(de) {
-        return gql('query($name:String!){ game(name:$name){ streams(first:30' + (de ? ', options:{languages:["DE"]}' : '') +
+        return gql('query($name:String!){ game(name:$name){ streams(first:100' + (de ? ', options:{languages:["DE"]}' : '') +
           '){ edges{ node{ ' + STREAM_FIELDS + ' } } } } }', { name: name })
           .then(function (d) { return d.game ? edgesToNodes(d.game.streams) : []; });
       }
@@ -391,6 +393,21 @@ TT.checkService = function () {
     },
 
     followedChannels: helixFollowedChannels,
+
+    // One page of all live channels, most viewers first: { items, cursor }. Signed in, the
+    // official Helix API pages through everything; anonymous GQL only gives the top 30.
+    liveStreamsPage: function (cursor) {
+      var de = TT.store.get('lang', 'de') === 'de';
+      if (auth.current()) {
+        return helix('streams?first=100' + (de ? '&language=de' : '') + (cursor ? '&after=' + encodeURIComponent(cursor) : ''))
+          .then(function (d) {
+            var next = d.pagination && d.pagination.cursor;
+            return helixStreams(d.data || []).then(function (items) { return { items: items, cursor: next || null }; });
+          });
+      }
+      if (cursor) return Promise.resolve({ items: [], cursor: null });
+      return api.topStreams().then(function (items) { return { items: items, cursor: null }; });
+    },
 
     // Channel page: profile, live stream (if any) and recent videos.
     channelPage: function (login) {
@@ -2251,13 +2268,36 @@ TT.checkService = function () {
     return out;
   }
 
+  function trackOf(el) {
+    var p = el.parentNode;
+    return p && p.classList && p.classList.contains('track') ? p : null;
+  }
+
+  // Scrolls just enough to show `el`: sideways inside a carousel, and vertically so the
+  // focused row (with its heading) stays on screen. No jumping to the centre.
+  function reveal(el) {
+    var track = trackOf(el);
+    if (track) {
+      var pad = track.clientWidth * 0.03, left = el.offsetLeft, right = left + el.offsetWidth;
+      if (left - track.scrollLeft < pad) track.scrollLeft = Math.max(0, left - pad);
+      else if (right - track.scrollLeft > track.clientWidth - pad) track.scrollLeft = right - track.clientWidth + pad;
+    }
+    var box = el.closest('.view, .side-lists');
+    if (!box) { if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(false); return; }
+    var anchor = el.closest('.row') || el;
+    var b = box.getBoundingClientRect(), m = b.height * 0.06;
+    var e = el.getBoundingClientRect();
+    if (e.bottom > b.bottom - m) box.scrollTop += e.bottom - (b.bottom - m);
+    var a = anchor.getBoundingClientRect();
+    if (a.top < b.top + m) box.scrollTop -= (b.top + m) - a.top;
+  }
+
   function set(el) {
     if (!el) return;
     if (current && current !== el) current.classList.remove('focused');
     current = el;
     el.classList.add('focused');
-    if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-    else el.scrollIntoView(false);
+    reveal(el);
     if (el.onfocusin2) el.onfocusin2();
   }
 
@@ -2269,6 +2309,15 @@ TT.checkService = function () {
   function move(dir) {
     var list = candidates();
     if (!current || list.indexOf(current) < 0) { set(list[0]); return; }
+    // Inside a carousel, left/right walk the cards; only the ends hand over to spatial
+    // navigation (e.g. from the first card into the sidebar).
+    var track = (dir === 'left' || dir === 'right') && trackOf(current);
+    if (track) {
+      var cards = [].slice.call(track.children).filter(function (c) { return c.classList.contains('focusable'); });
+      var i = cards.indexOf(current) + (dir === 'right' ? 1 : -1);
+      if (i >= 0 && i < cards.length) { set(cards[i]); return; }
+      if (dir === 'right') return;
+    }
     var c = current.getBoundingClientRect();
     var best = null, bestScore = Infinity;
     for (var i = 0; i < list.length; i++) {
@@ -2318,11 +2367,12 @@ TT.checkService = function () {
 (function () {
   var main, stack = []; // entries: { name, el, lastFocus, onLeave }
   var sideItems = {};
-  var followBox = null, followTimer = null;
+  var followBox = null, followTimer = null, recBox = null;
   var focusContent = false; // set when a page is opened from the sidebar menu
 
   var NAV = [
     ['home', 'Startseite', 'M12 3l9 8h-3v9h-5v-6h-2v6H6v-9H3z'],
+    ['live', 'Live-Kanäle', 'M3 6h13v12H3zM17.5 10.5L22 7v10l-4.5-3.5z'],
     ['following', 'Folge ich', 'M12 21l-1.4-1.3C5.4 15 2 12 2 8.4 2 5.4 4.4 3 7.4 3c1.7 0 3.4.8 4.6 2.1C13.2 3.8 14.9 3 16.6 3 19.6 3 22 5.4 22 8.4c0 3.6-3.4 6.6-8.6 11.3z'],
     ['categories', 'Kategorien', 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z'],
     ['search', 'Suche', 'M10 3a7 7 0 015.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z'],
@@ -2617,6 +2667,7 @@ TT.checkService = function () {
       TT.clear(followBox);
       var hint = TT.el('div', 'fol-login', 'Melde dich an, um deine Kanäle hier zu sehen');
       followBox.appendChild(TT.focusable(hint, function () { resetTo('settings', views.settings); }));
+      refreshRecommended({});
       return;
     }
     var liveP = TT.api.followedLive().catch(function () { return []; });
@@ -2631,7 +2682,22 @@ TT.checkService = function () {
       offline.forEach(function (c) { followBox.appendChild(followEntry(c, null)); });
       if (!live.length && !offline.length) followBox.appendChild(TT.el('div', 'fol-login', 'Keine gefolgten Kanäle'));
       if (hadFocus) focusFirstIn(followBox);
+      refreshRecommended(liveLogins);
     });
+  }
+
+  // "Empfohlene Kanäle": the most-watched live channels in the chosen language (like the
+  // browser sidebar), without the followed ones already listed above.
+  function refreshRecommended(skip) {
+    if (!recBox) return;
+    skip = skip || {};
+    var hadFocus = recBox.contains(TT.focus.get());
+    TT.api.topStreams().then(function (top) {
+      var list = top.filter(function (s) { return !skip[s.broadcaster.login]; }).slice(0, 10);
+      TT.clear(recBox);
+      list.forEach(function (s) { recBox.appendChild(followEntry(s.broadcaster, s, list)); });
+      if (hadFocus) focusFirstIn(recBox);
+    }).catch(function () { /* keep the old list */ });
   }
 
   // ---- screens ---------------------------------------------------------------
@@ -2690,6 +2756,41 @@ TT.checkService = function () {
         }
         return el.querySelector('.focusable');
       }, 'Du folgst noch keinen Kanälen');
+    },
+
+    // All live channels as a grid; more load automatically near the end of the list.
+    live: function () {
+      var signedIn = !!TT.api.auth.current();
+      var de = TT.store.get('lang', 'de') === 'de';
+      var el = section('Live-Kanäle', (de ? 'Deutschsprachige Streams' : 'Alle Sprachen') + ', nach Zuschauern sortiert' +
+        (signedIn ? '' : ' · Melde dich an, um mehr als die Top 30 zu sehen'));
+      push('live', el);
+      var g = grid([]), cursor = null, loading = false, seen = {}, all = [];
+      function add(items) {
+        items.forEach(function (s) {
+          if (seen[s.id]) return;
+          seen[s.id] = 1;
+          all.push(s);
+          var card = streamCard(s, all);
+          card.onfocusin2 = function () { if (all.length - all.indexOf(s) <= 8) more(); };
+          g.appendChild(card);
+        });
+      }
+      function more() {
+        if (loading || !cursor) return;
+        loading = true;
+        TT.api.liveStreamsPage(cursor).then(function (r) {
+          cursor = r.cursor;
+          add(r.items);
+          loading = false;
+        }, function () { loading = false; });
+      }
+      load(el, TT.api.liveStreamsPage(null), function (r) {
+        cursor = r.cursor;
+        el.appendChild(g);
+        add(r.items);
+        return g.querySelector('.focusable');
+      }, 'Gerade ist niemand live');
     },
 
     categories: function () {
@@ -2802,7 +2903,7 @@ TT.checkService = function () {
       var query = '';
       var timer = null;
       var input = TT.el('div', 'search-box');
-      input.appendChild(icon(NAV[3][2]));
+      input.appendChild(icon(NAV[4][2]));
       var text = TT.el('span', 'search-text');
       input.appendChild(text);
       input.appendChild(TT.el('span', 'caret'));
@@ -2936,8 +3037,13 @@ TT.checkService = function () {
       });
       side.appendChild(nav);
       side.appendChild(TT.el('div', 'side-h', 'Gefolgte Kanäle'));
+      var lists = TT.el('div', 'side-lists');
       followBox = TT.el('div', 'side-follows');
-      side.appendChild(followBox);
+      lists.appendChild(followBox);
+      lists.appendChild(TT.el('div', 'side-h', 'Empfohlene Kanäle'));
+      recBox = TT.el('div', 'side-follows');
+      lists.appendChild(recBox);
+      side.appendChild(lists);
       refreshFollows();
       // Player's 'Channel' button: leave the player and show that channel's page
       // (or go back to it if we came from there).

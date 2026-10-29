@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.5';
+TT.VERSION = '0.6.0';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -124,6 +124,34 @@ TT.toast = (function () {
 })();
 
 // hls.js (415 KB) is loaded after the UI is up, not before, so startup isn't blocked on it.
+// QR codes (login, chat on the phone): vendor/qrcode.js (MIT, Kazuhiko Arase), loaded on
+// first use. Resolves with an <img> of the code.
+TT.qrImage = (function () {
+  var pending = null;
+  function lib() {
+    if (window.qrcode) return Promise.resolve(window.qrcode);
+    if (pending) return pending;
+    pending = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'vendor/qrcode.js';
+      s.onload = function () { if (window.qrcode) resolve(window.qrcode); else reject(new Error('qrcode.js did not start')); };
+      s.onerror = function () { pending = null; reject(new Error('Could not load qrcode.js')); };
+      document.head.appendChild(s);
+    });
+    return pending;
+  }
+  return function (text, cls) {
+    return lib().then(function (qrcode) {
+      var q = qrcode(0, 'M');
+      q.addData(text);
+      q.make();
+      var img = TT.el('img', 'qr' + (cls ? ' ' + cls : ''));
+      img.src = q.createDataURL(8, 2);
+      return img;
+    });
+  };
+})();
+
 TT.loadHls = (function () {
   var pending = null;
   return function () {
@@ -613,6 +641,28 @@ TT.checkService = function () {
       });
     },
 
+    // Categories the signed-in user follows that are live right now.
+    followedGames: function () {
+      return gql('query{ currentUser{ followedGames(first:30, type:LIVE){ nodes{ id name displayName ' +
+        'boxArtURL(width:192,height:256) viewersCount } } } }').then(function (d) {
+        return d.currentUser && d.currentUser.followedGames ? d.currentUser.followedGames.nodes || [] : [];
+      });
+    },
+
+    // { id, following } for the category `name` (signed in).
+    gameFollow: function (name) {
+      return gql('query($n:String!){ game(name:$n){ id self{ follow{ followedAt } } } }', { n: name }).then(function (d) {
+        if (!d.game) throw new Error('Kategorie nicht gefunden');
+        return { id: d.game.id, following: !!(d.game.self && d.game.self.follow) };
+      });
+    },
+
+    setGameFollow: function (id, on) {
+      return gql(on ? 'mutation($id:ID!){ followGame(input:{gameID:$id}){ game{ id } } }'
+        : 'mutation($id:ID!){ unfollowGame(input:{gameID:$id}){ game{ id } } }', { id: id })
+        .then(function () { return on; });
+    },
+
     // Chat message as the signed-in user (the same GQL mutation twitch.tv uses). It comes
     // back through the normal (anonymous) chat connection like every other message.
     sendChat: function (login, message) {
@@ -689,7 +739,7 @@ TT.checkService = function () {
     },
 
     playbackToken: function (login, playerType, anonymous) {
-      var platform = playerType === 'autoplay' ? 'android' : 'web';
+      var platform = playerType === 'autoplay' || playerType === 'mobile_feed' ? 'android' : 'web';
       return gql('query($login:String!,$pt:String!,$pf:String!){ ' +
         'streamPlaybackAccessToken(channelName:$login, params:{platform:$pf, ' +
         'playerBackend:"mediaplayer", playerType:$pt}){ value signature } }',
@@ -722,13 +772,15 @@ TT.checkService = function () {
 // playlist's segments are ad segments (EXTINF title other than "live"). We:
 //   1. detect ad segments / ad markers in every media playlist reload,
 //   2. while ads are present, fetch a playlist for the same quality with a different
-//      playerType ("embed", "popout", "autoplay"), which often comes without ads,
+//      playerType, which often comes without ads: "mobile_feed" (as Android; ad-free at
+//      full quality, see scamorza/TwitchAdBlock), "embed", "popout", and last
+//      "autoplay" (ad-free but only up to 360p),
 //   3. if every backup has ads too, strip the ad segments (picture freezes, no ad).
 // Output playlists are renumbered by PROGRAM-DATE-TIME so hls.js sees one continuous
 // sequence even when we switch between the main and backup playlists.
 (function (root) {
   var AD_MARKER = /stitched-ad|X-TV-TWITCH-AD|CLASS="twitch-ad/i;
-  var BACKUP_TYPES = ['embed', 'popout', 'autoplay'];
+  var BACKUP_TYPES = ['mobile_feed', 'embed', 'popout', 'autoplay'];
 
   function attr(line, name) {
     var m = new RegExp('[:,]' + name + '=("([^"]*)"|[^,]*)').exec(line);
@@ -1210,9 +1262,52 @@ TT.checkService = function () {
 (function () {
   var MAX_LINES = 40; // more never fits on screen; fewer DOM nodes on slow TVs
   var MODES = ['off', 'side', 'overlay'];
-  var ws = null, channel = null, box = null, list = null, reconnectTimer = null;
+  var SIZES = ['s', 'm', 'l', 'xl'];
+  var ws = null, channel = null, box = null, list = null, reconnectTimer = null, qrBox = null;
   var mode = TT.store.get('chatMode', 'side');
   if (MODES.indexOf(mode) < 0) mode = 'side';
+  var size = TT.store.get('chatSize', 'm');
+  if (SIZES.indexOf(size) < 0) size = 'm';
+
+  function me() {
+    var a = TT.api.auth.current();
+    return a && a.login ? a.login.toLowerCase() : null;
+  }
+
+  function trim() { while (list.childNodes.length > MAX_LINES) list.removeChild(list.firstChild); }
+
+  // ---- delay: messages appear when the picture gets there (no spoilers) ---------------
+  // The video runs behind the live edge by the player's latency plus ~2 s that Twitch needs
+  // to encode and publish a segment; chat arrives in real time.
+  var syncOn = TT.store.get('chatSync', true);
+  var queue = [], flushTimer = null;
+
+  function delayMs() {
+    if (!syncOn || !TT.player || !TT.player.latency) return 0;
+    var l = TT.player.latency();
+    return l > 0 ? Math.min(30, l + 2) * 1000 : 0;
+  }
+
+  function flush() {
+    var now = Date.now();
+    while (queue.length && queue[0].at <= now) queue.shift().fn();
+    if (!queue.length) { clearInterval(flushTimer); flushTimer = null; }
+  }
+
+  function enqueue(fn) {
+    var d = delayMs();
+    if (!d) { fn(); return; }
+    var at = Date.now() + d;
+    if (queue.length && queue[queue.length - 1].at > at) at = queue[queue.length - 1].at;
+    queue.push({ at: at, fn: fn });
+    if (!flushTimer) flushTimer = setInterval(flush, 250);
+  }
+
+  function clearQueue() {
+    queue = [];
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
 
   // ---- 7TV emotes (can be turned off in Settings for slower TVs) -------------
   var sevenTvOn = TT.store.get('sevenTv', true);
@@ -1344,6 +1439,15 @@ TT.checkService = function () {
   function addLine(tags, nick, text) {
     if (!list) return;
     var line = TT.el('div', 'chat-line');
+    // Highlights: your own messages, mentions of you, highlighted (channel points) and Bits.
+    var my = me();
+    if (my && nick.toLowerCase() === my) line.className += ' chat-own';
+    else if (my && new RegExp('(^|[^a-z0-9_])' + my + '([^a-z0-9_]|$)').test(text.toLowerCase())) line.className += ' chat-mention';
+    if (tags['msg-id'] === 'highlighted-message') line.className += ' chat-highlight';
+    if (tags.bits) {
+      line.className += ' chat-bits';
+      line.appendChild(TT.el('span', 'bits', TT.fmtCount(parseInt(tags.bits, 10) || 0) + ' Bits'));
+    }
     // Small coloured badges like Twitch: moderator, VIP, subscriber.
     var badges = tags.badges || '';
     if (/(^|,)(broadcaster|moderator)\//.test(badges)) line.appendChild(TT.el('span', 'bdg mod', 'M'));
@@ -1358,7 +1462,65 @@ TT.checkService = function () {
     renderMessage(text, tags.emotes, msg);
     line.appendChild(msg);
     list.appendChild(line);
-    while (list.childNodes.length > MAX_LINES) list.removeChild(list.firstChild);
+    trim();
+  }
+
+  // ---- USERNOTICE: subs, gifted subs, raids, announcements --------------------------------
+  function unescapeTag(v) {
+    return String(v || '').replace(/\\s/g, ' ').replace(/\\:/g, ';').replace(/\\\\/g, '\\');
+  }
+
+  // German headline for an event, null to skip it.
+  function noticeText(t) {
+    var id = t['msg-id'];
+    var who = unescapeTag(t['display-name']) || t.login || 'Jemand';
+    function param(k) { return unescapeTag(t['msg-param-' + k]); }
+    switch (id) {
+      case 'sub':
+      case 'resub':
+        var months = parseInt(param('cumulative-months'), 10) || 0;
+        return who + ' hat abonniert' + (param('sub-plan') === 'Prime' ? ' (Prime)' : '') +
+          (months > 1 ? ' – seit ' + months + ' Monaten' : '');
+      case 'subgift':
+      case 'anonsubgift':
+        if (t['msg-param-community-gift-id']) return null; // one of many: the total is shown once
+        return (id === 'anonsubgift' ? 'Jemand' : who) + ' schenkt ' + param('recipient-display-name') + ' ein Abo';
+      case 'submysterygift':
+      case 'anonsubmysterygift':
+        var n = parseInt(param('mass-gift-count'), 10) || 1;
+        return (id === 'anonsubmysterygift' ? 'Jemand' : who) + ' verschenkt ' + n + (n === 1 ? ' Abo' : ' Abos') + ' an den Chat';
+      case 'giftpaidupgrade':
+      case 'anongiftpaidupgrade':
+      case 'primepaidupgrade':
+        return who + ' bleibt Abonnent';
+      case 'raid':
+        return param('displayName') + ' raidet mit ' + TT.fmtCount(parseInt(param('viewerCount'), 10) || 0) + ' Zuschauern';
+      case 'announcement':
+        return 'Ankündigung von ' + who;
+      case 'bitsbadgetier':
+        return who + ' hat ein neues Bits-Abzeichen';
+      case 'viewermilestone':
+        return who + ' schaut ' + param('value') + ' Streams in Folge';
+      default:
+        return unescapeTag(t['system-msg']) || null;
+    }
+  }
+
+  function notice(tags, text) {
+    var head = noticeText(tags);
+    if (!head) return;
+    enqueue(function () {
+      if (!list) return;
+      var ev = TT.el('div', 'chat-line chat-event' + (tags['msg-id'] === 'announcement' ? ' chat-announce' : ''));
+      ev.appendChild(TT.el('div', 'chat-event-h', head));
+      if (text) {
+        var msg = TT.el('div', 'chat-text');
+        renderMessage(text, tags.emotes, msg);
+        ev.appendChild(msg);
+      }
+      list.appendChild(ev);
+      trim();
+    });
   }
 
   function system(text) {
@@ -1379,7 +1541,9 @@ TT.checkService = function () {
         raw = raw.substring(sp + 1);
       }
       var m = /^:([^!\s]+)![^\s]+ PRIVMSG #[^\s]+ :(.*)$/.exec(raw);
-      if (m) addLine(tags, m[1], m[2]);
+      var n = m ? null : /^:tmi\.twitch\.tv USERNOTICE #[^\s]+(?: :(.*))?$/.exec(raw);
+      if (m) enqueue(addLine.bind(null, tags, m[1], m[2]));
+      else if (n) notice(tags, n[1] || '');
       else if (/ JOIN #/.test(raw) && raw.indexOf(':justinfan') === 0) system('Mit dem Chat verbunden');
       else if (raw.indexOf(' CLEARCHAT ') >= 0 || raw.indexOf(' CLEARMSG ') >= 0) { /* ignore */ }
     }
@@ -1433,7 +1597,7 @@ TT.checkService = function () {
     });
     line.appendChild(msg);
     list.appendChild(line);
-    while (list.childNodes.length > MAX_LINES) list.removeChild(list.firstChild);
+    trim();
   }
 
   function replayFetch(from) {
@@ -1455,19 +1619,39 @@ TT.checkService = function () {
 
   function applyMode() {
     var root = document.getElementById('player');
-    root.className = root.className.replace(/\bchat-\w+\b/g, '').trim() + ' chat-' + mode;
+    root.className = root.className.replace(/\bchat-[\w-]+\b/g, '').trim() + ' chat-' + mode + ' chat-size-' + size;
+  }
+
+  // QR code under the chat: opens this channel's chat on the phone (to write there).
+  function showQr(login) {
+    TT.clear(qrBox);
+    qrBox.style.display = 'none';
+    if (!login || !TT.store.get('chatQr', true)) return;
+    TT.qrImage('https://www.twitch.tv/popout/' + login + '/chat').then(function (img) {
+      if (channel !== login) return;
+      qrBox.appendChild(img);
+      var t = TT.el('div', 'chat-qr-text', 'Chat am Handy');
+      t.appendChild(TT.el('span', '', 'Scannen, um dort mitzulesen und zu schreiben'));
+      qrBox.appendChild(t);
+      qrBox.style.display = '';
+    }).catch(function () { /* no QR */ });
   }
 
   TT.chat = {
     init: function () {
       box = document.getElementById('chat');
       list = document.getElementById('chat-list');
+      qrBox = TT.el('div', '');
+      qrBox.id = 'chat-qr';
+      qrBox.style.display = 'none';
+      box.appendChild(qrBox);
       applyMode();
     },
     // VOD: replay the chat of video `id` (owner's emotes) in step with replayTick(time).
     openReplay: function (id, login) {
       TT.chat.close();
       TT.clear(list);
+      showQr(null);
       loadSevenTv(login.toLowerCase());
       replay = { id: id, buf: [], seen: {}, until: -1, fetching: false, lastT: -100 };
     },
@@ -1488,7 +1672,31 @@ TT.checkService = function () {
       channel = login.toLowerCase();
       TT.clear(list);
       loadSevenTv(channel);
+      showQr(channel);
       if (mode !== 'off') connect();
+    },
+    // The open channel's 7TV/BTTV/FFZ emotes: [{ name, url }] (for the chat keyboard).
+    channelEmotes: function () {
+      var out = [];
+      for (var k in stvChannel) if (stvChannel.hasOwnProperty(k)) out.push({ name: k, url: stvChannel[k] });
+      return out;
+    },
+    sizeLabel: function () { return { s: 'Klein', m: 'Normal', l: 'Groß', xl: 'Sehr groß' }[size]; },
+    cycleSize: function () {
+      size = SIZES[(SIZES.indexOf(size) + 1) % SIZES.length];
+      TT.store.set('chatSize', size);
+      applyMode();
+    },
+    syncEnabled: function () { return syncOn; },
+    setSync: function (on) {
+      syncOn = !!on;
+      TT.store.set('chatSync', syncOn);
+      if (!on) { var q = queue; clearQueue(); q.forEach(function (x) { x.fn(); }); }
+    },
+    qrEnabled: function () { return TT.store.get('chatQr', true); },
+    setQr: function (on) {
+      TT.store.set('chatQr', !!on);
+      showQr(on ? channel : null);
     },
     sevenTvEnabled: function () { return sevenTvOn; },
     setSevenTv: function (on) {
@@ -1498,6 +1706,7 @@ TT.checkService = function () {
     },
     close: function () {
       clearTimeout(reconnectTimer);
+      clearQueue();
       replay = null;
       var old = ws;
       channel = null;
@@ -2285,6 +2494,7 @@ TT.checkService = function () {
     fwd: 'M13 6v12l9-6zM3 6v12l9-6z',
     chat: 'M4 5h16v11H8l-4 4z',
     write: 'M4 17v3h3l10-10-3-3zm15-9l-3-3 2-2 3 3z',
+    reload: 'M17.65 6.35A8 8 0 1 0 19.73 14h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z',
     comp: 'M3 9h4l5-5v16l-5-5H3zM15 9h2v6h-2zM19 7h2v10h-2z',
     up: 'M12 4l6 7h-4v9h-4v-9H6z',
     down: 'M12 20l-6-7h4V4h4v9h4z',
@@ -2471,6 +2681,34 @@ TT.checkService = function () {
     });
     el.appendChild(quick);
 
+    // The channel's 7TV/BTTV/FFZ emotes, ten at a time ('›' shows the next ones).
+    var emotes = TT.chat.channelEmotes();
+    if (emotes.length) {
+      var erow = TT.el('div', 'keyrow compose-emotes'), page = 0, PER = 10;
+      var paintEmotes = function () {
+        TT.clear(erow);
+        emotes.slice(page * PER, page * PER + PER).forEach(function (e) {
+          var k = TT.focusable(TT.el('div', 'key emote-key'), function () {
+            composeType((compose.text && !/\s$/.test(compose.text) ? ' ' : '') + e.name + ' ');
+          });
+          var img = TT.el('img');
+          img.src = e.url;
+          img.alt = e.name;
+          k.appendChild(img);
+          erow.appendChild(k);
+        });
+        if (emotes.length > PER) {
+          erow.appendChild(TT.focusable(TT.el('div', 'key', '›'), function () {
+            page = (page + 1) % Math.ceil(emotes.length / PER);
+            paintEmotes();
+            TT.focus.set(erow.lastChild);
+          }));
+        }
+      };
+      paintEmotes();
+      el.appendChild(erow);
+    }
+
     var first = null;
     COMPOSE_ROWS.forEach(function (keys) {
       var r = TT.el('div', 'keyrow');
@@ -2493,7 +2731,20 @@ TT.checkService = function () {
     actions.appendChild(TT.focusable(TT.el('div', 'key wide send', 'Senden'), function () { sendCompose(compose.text); }));
     el.appendChild(actions);
     el.appendChild(TT.el('div', 'compose-hint', 'Oben: sofort senden  ·  Zurück: abbrechen'));
-    $('player').appendChild(el);
+    // Writing on the phone is easier: the channel's chat as a QR code next to the keyboard.
+    var wrap = TT.el('div', '');
+    wrap.id = 'compose';
+    el.id = '';
+    el.className = 'compose-keys';
+    wrap.appendChild(el);
+    var side = TT.el('div', 'compose-qr');
+    wrap.appendChild(side);
+    TT.qrImage('https://www.twitch.tv/popout/' + TT.player.currentLogin() + '/chat').then(function (img) {
+      side.appendChild(img);
+      side.appendChild(TT.el('div', '', 'Lieber am Handy schreiben? Scannen öffnet den Chat dort.'));
+    }).catch(function () { side.style.display = 'none'; });
+    compose.el = wrap;
+    $('player').appendChild(wrap);
     composeUpdate();
     TT.focus.set(first);
   }
@@ -2548,6 +2799,7 @@ TT.checkService = function () {
     if (isVod) list.push({ icon: 'speed', label: 'Tempo: ' + fmtSpeed(speed), fn: cycleSpeed });
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
     if (!isClip) list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
+    list.push({ icon: 'reload', label: 'Neu laden', fn: function () { TT.toast('Wird neu geladen …'); restart(); } });
     if (following !== null) list.push({ icon: 'heart', label: following ? 'Folge ich' : 'Folgen', fn: toggleFollow });
     if (!isVod && playlist.length > 1) {
       list.push({ icon: 'up', label: 'Vorheriger', fn: function () { switchStream(-1); } });
@@ -2799,6 +3051,31 @@ TT.checkService = function () {
     return !err.status ? /^(Network error|Timeout)$/.test(String(err.message)) : err.status >= 502;
   }
 
+  // ---- watchdog for frozen playback ------------------------------------------------------
+  // The picture can freeze without hls.js reporting an error (e.g. the TV's decoder hangs).
+  // If the time stands still for 12 s while nothing explains it (paused, loading, waiting
+  // for the internet, ad break), reload; if it freezes again soon after, one quality lower.
+  var watch = { last: -1, since: 0, reloads: [] };
+
+  function watchdog() {
+    var now = Date.now();
+    var explained = !current || video.paused || video.ended || pausedAt || scrub.active || compose ||
+      now - startedAt < 15000 || $('player-status').textContent || (ctrl && ctrl.adActive);
+    if (explained || video.currentTime !== watch.last) {
+      watch.last = video.currentTime;
+      watch.since = now;
+      return;
+    }
+    if (now - watch.since < 12000) return;
+    watch.since = now;
+    watch.reloads = watch.reloads.filter(function (t) { return now - t < 120000; });
+    watch.reloads.push(now);
+    TT.log('watchdog: playback frozen, reloading');
+    if (watch.reloads.length > 1) dropQuality();
+    else TT.toast('Das Bild war eingefroren – wird neu geladen');
+    restart();
+  }
+
   // Reconnect; videos continue where they were.
   function restart() {
     if (current && current.vod && !current.clip && video.currentTime > 0) {
@@ -2849,12 +3126,15 @@ TT.checkService = function () {
     // fMP4 segments (Enhanced Broadcasting, live and VOD) are repackaged as TS, see fmp4ts.js.
     var conv = new TT.fmp4ts.Converter();
     if (isVod) vodMaps = {};
+    var latency = TT.store.get('latency', 'low');
     var cfg = {
       pLoader: makePlaylistLoader(loaderCtrl),
-      // Low latency stays ~2 segments behind live; 'normal' gives slow TVs more buffer.
-      liveSyncDurationCount: TT.store.get('latency', 'low') === 'low' ? 2 : 3,
+      // Distance to the live edge in seconds. Not in segments: Twitch announces a target
+      // duration of 6 s for its 2 s segments, so "2 segments" meant 12 s behind live.
+      // 'low' ~6 s, 'normal' ~10 s (more buffer for slow TVs).
+      liveSyncDuration: latency === 'normal' ? 10 : 6,
       // Videos (also recordings still in progress) must never be pulled to the live edge.
-      liveMaxLatencyDurationCount: isVod ? Infinity : TT.store.get('latency', 'low') === 'low' ? 6 : 10,
+      liveMaxLatencyDuration: isVod ? Infinity : latency === 'normal' ? 20 : 14,
       maxBufferLength: isVod ? 30 : 20,
       startPosition: isVod ? (current.startAt || 0) : -1,
       backBufferLength: 10,
@@ -3076,6 +3356,7 @@ TT.checkService = function () {
     init: function () {
       video = $('video');
       bindVideo();
+      setInterval(watchdog, 2000);
       TT.chat.init();
     },
 
@@ -3176,6 +3457,8 @@ TT.checkService = function () {
     },
 
     currentLogin: function () { return current && current.stream ? current.stream.broadcaster.login : null; },
+    // Seconds the live picture runs behind the playlist's live edge (0 when unknown).
+    latency: function () { return hls && current && current.stream && hls.latency > 0 ? hls.latency : 0; },
 
     // Set by the views: opens a channel page from the player's "Channel" button.
     onChannelPage: null,
@@ -3450,11 +3733,31 @@ TT.checkService = function () {
     highlightSide();
   }
 
+  // The home page is rebuilt when you come back to it after 5 minutes or more.
+  var HOME_STALE_MS = 5 * 60 * 1000;
+  function homeIsStale() {
+    var t = top();
+    return stack.length === 1 && t && t.name === 'home' && Date.now() - (t.loadedAt || 0) > HOME_STALE_MS;
+  }
+  function rebuildHome() {
+    var t = stack.pop();
+    if (t.onLeave) t.onLeave();
+    main.removeChild(t.el);
+    focusContent = true;
+    views.home();
+  }
+
   function pop() {
     if (stack.length <= 1) return false;
     var t = stack.pop();
     if (t.onLeave) t.onLeave();
     if (!t.player) main.removeChild(t.el);
+    if (homeIsStale()) {
+      highlightSide();
+      if (t.player) { setZap(false); markPlaying(null); }
+      rebuildHome();
+      return true;
+    }
     var prev = top();
     prev.el.style.display = '';
     highlightSide();
@@ -3988,6 +4291,7 @@ TT.checkService = function () {
     home: function () {
       var el = section('');
       push('home', el);
+      top().loadedAt = Date.now();
       if (followBox && followBox.firstChild) refreshFollows();
       var signedIn = !!TT.api.auth.current();
       var followedP = signedIn ? TT.api.followedLive().catch(function () { return []; }) : Promise.resolve([]);
@@ -4003,6 +4307,15 @@ TT.checkService = function () {
         if (followed.length) {
           el.appendChild(carousel('Live-Kanäle', ', denen du folgst',
             followed.map(function (s) { return streamCard(s, followed); })));
+        }
+        // Categories you follow that are live right now.
+        if (signedIn) {
+          var catSlot = TT.el('div');
+          el.appendChild(catSlot);
+          TT.api.followedGames().then(function (games) {
+            if (games.length) catSlot.appendChild(carousel('Deine', ' Kategorien', games.map(function (g) { return categoryCard(g); })));
+            TT.lazy();
+          }).catch(function () { /* optional row */ });
         }
         // Videos started but not finished.
         var cont = TT.watched.list().filter(function (w) { return TT.vodPos(w.vod.id) > 30; });
@@ -4246,6 +4559,26 @@ TT.checkService = function () {
     category: function (g) {
       var el = section(g.displayName || g.name, g.viewersCount ? TT.fmtViewers(g.viewersCount) : '');
       push('category', el);
+      // Follow / unfollow the category (signed in).
+      if (TT.api.auth.current()) {
+        var bar = TT.el('div', 'toolbar');
+        el.appendChild(bar);
+        TT.api.gameFollow(g.name).then(function (f) {
+          var busy = false;
+          var btn = button(f.following ? '♥  Folge ich' : '♡  Folgen', function () {
+            if (busy) return;
+            busy = true;
+            TT.api.setGameFollow(f.id, !f.following).then(function (on) {
+              f.following = on;
+              btn.textContent = on ? '♥  Folge ich' : '♡  Folgen';
+              TT.toast(on ? 'Du folgst jetzt ' + (g.displayName || g.name) : 'Du folgst ' + (g.displayName || g.name) + ' nicht mehr');
+            }, function (e) {
+              TT.toast('Hat nicht geklappt: ' + (e.message || e));
+            }).then(function () { busy = false; });
+          }, f.following ? '' : 'primary');
+          bar.appendChild(btn);
+        }).catch(function () { /* no button */ });
+      }
       var clipsSlot = TT.el('div');
       load(el, TT.api.categoryStreams(g.name), function (streams) {
         el.appendChild(clipsSlot);
@@ -4385,9 +4718,17 @@ TT.checkService = function () {
           var q = TT.store.get('quality', 'auto');
           TT.store.set('quality', Q[(Q.indexOf(q) + 1) % Q.length]);
         });
-      row('Verzögerung', 'Gering: näher am Live-Geschehen. Normal: mehr Puffer, falls es ruckelt',
-        function () { return TT.store.get('latency', 'low') === 'low' ? 'Gering' : 'Normal'; },
-        function () { TT.store.set('latency', TT.store.get('latency', 'low') === 'low' ? 'normal' : 'low'); });
+      row('Verzögerung', 'Gering: etwa 6 s hinter live. Normal: etwa 10 s, mehr Puffer, falls es ruckelt',
+        function () { return TT.store.get('latency', 'low') === 'normal' ? 'Normal' : 'Gering'; },
+        function () { TT.store.set('latency', TT.store.get('latency', 'low') === 'normal' ? 'low' : 'normal'); });
+      row('Chat passend zum Bild', 'Zeigt Nachrichten erst, wenn das Bild so weit ist – keine Spoiler',
+        function () { return TT.chat.syncEnabled() ? 'An' : 'Aus'; },
+        function () { TT.chat.setSync(!TT.chat.syncEnabled()); });
+      row('Schriftgröße im Chat', 'Für den Abstand vom Sofa',
+        function () { return TT.chat.sizeLabel(); }, function () { TT.chat.cycleSize(); });
+      row('QR-Code unter dem Chat', 'Öffnet den Chat des Kanals auf dem Handy, zum Mitschreiben',
+        function () { return TT.chat.qrEnabled() ? 'An' : 'Aus'; },
+        function () { TT.chat.setQr(!TT.chat.qrEnabled()); });
       row('Emotes im Chat', '7TV, BTTV und FFZ. Ausschalten, falls der Chat die Wiedergabe ruckeln lässt',
         function () { return TT.chat.sevenTvEnabled() ? 'An' : 'Aus'; },
         function () { TT.chat.setSevenTv(!TT.chat.sevenTvEnabled()); });
@@ -4482,10 +4823,17 @@ TT.checkService = function () {
       TT.api.auth.startDeviceFlow().then(function (d) {
         TT.clear(status);
         var p = TT.el('p', '', 'Öffne auf dem Handy oder PC ');
-        p.appendChild(TT.el('span', 'login-url', d.verification_uri.replace(/^https?:\/\//, '')));
+        p.appendChild(TT.el('span', 'login-url', d.verification_uri.replace(/^https?:\/\//, '').replace(/\?.*$/, '')));
         p.appendChild(document.createTextNode(' und gib diesen Code ein:'));
         status.appendChild(p);
         status.appendChild(TT.el('div', 'login-code', d.user_code));
+        // Or scan: Twitch's link already carries the code.
+        var qrSlot = TT.el('div', 'login-qr');
+        status.appendChild(qrSlot);
+        TT.qrImage(d.verification_uri).then(function (img) {
+          qrSlot.appendChild(img);
+          qrSlot.appendChild(TT.el('div', '', 'Oder mit dem Handy scannen – der Code ist dann schon eingetragen.'));
+        }).catch(function () { /* code above is enough */ });
         status.appendChild(TT.el('p', 'dim', 'Wartet auf Bestätigung …'));
         var deadline = Date.now() + d.expires_in * 1000;
         var interval = Math.max(d.interval || 5, 3) * 1000;
@@ -4552,7 +4900,11 @@ TT.checkService = function () {
       side.appendChild(lists);
       refreshFollows();
       TT.player.onFollowChange = refreshFollows;
-      document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshFollows(); });
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) return;
+        refreshFollows();
+        if (homeIsStale()) rebuildHome();
+      });
       // Player's 'Channel' button: leave the player and show that channel's page
       // (or go back to it if we came from there).
       TT.player.onChannelPage = function (login) {

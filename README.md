@@ -8,8 +8,9 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 - **Läuft auf älteren Fernsehern (Tizen 3.0):** Streams und Videos im fMP4-Format („Enhanced Broadcasting“) werden vor
   der Wiedergabe in MPEG-TS umgepackt. Ohne das bleibt das Bild bei solchen Kanälen schwarz.
 - **Oberfläche auf Deutsch im Twitch-Stil:**
-  - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, Weiterschauen, „Was habe ich verpasst?“ mit
-    den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien)
+  - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, deine Kategorien, Weiterschauen, „Was habe ich
+    verpasst?“ mit den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien); sie lädt sich
+    neu, wenn man nach ein paar Minuten zurückkommt
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
     neu gestartet), die Auswahl bleibt gespeichert; 100 Kategorien mit Clips der Woche
   - TV-Programm: geplante Streams der Kanäle, denen du folgst, als Wochenübersicht
@@ -17,17 +18,23 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
     ein Kanal aus der Leiste läuft neben ihr, mit ▲/▼ und OK wird durchgezappt
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
-  Qualität umschaltbar, geringe Verzögerung, Chat mit Abzeichen und Emotes von 7TV, BTTV und FFZ,
-  Lautstärke-Ausgleich, Statistik auf der INFO-Taste. Titel, Kategorie und Zuschauer werden jede Minute aktualisiert.
+  Qualität umschaltbar, etwa 6 s hinter live, Knopf „Neu laden“, Lautstärke-Ausgleich, Statistik auf der INFO-Taste.
+  Titel, Kategorie und Zuschauer werden jede Minute aktualisiert. Werbepausen laufen über eine werbefreie Quelle in
+  voller Qualität weiter.
+- **Chat:** Abzeichen und Emotes von 7TV, BTTV und FFZ, passend zum Bild verzögert (keine Spoiler), Abos, Raids und
+  Ankündigungen, Hervorhebung von Erwähnungen und eigenen Nachrichten, einstellbare Schriftgröße, QR-Code zum
+  Mitschreiben am Handy.
 - **Stabil bei Aussetzern:** Fällt das Internet aus, wartet die App und spielt danach von selbst weiter (Videos an
-  derselben Stelle). Hakt ein Stream immer wieder, geht sie eine Qualitätsstufe runter. Gesperrte Inhalte
+  derselben Stelle). Hakt ein Stream immer wieder oder friert das Bild ein, lädt sie neu und geht nötigenfalls eine
+  Qualitätsstufe runter. Gesperrte Inhalte
   (nur für Abonnenten, im Land nicht verfügbar) werden verständlich gemeldet.
 - **Videos und Clips:** Weiterschauen an der letzten Stelle, Chat-Wiedergabe, Kapitel, Vorschaubilder beim Spulen,
   Hype-Momente (Stellen mit viel Chat-Aktivität), Wiedergabetempo bis 2×, Clips laufen nacheinander durch.
 - **Favoriten** (ohne Konto): stehen oben in der Seitenleiste, nur für sie kommt der Hinweis „ist jetzt live“.
-- **Mit Twitch-Konto:** im Chat schreiben (Bildschirmtastatur mit Schnellantworten), Kanälen folgen und entfolgen,
-  gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.
-- **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Emotes.
+- **Mit Twitch-Konto** (Anmeldung per Code oder QR-Code): im Chat schreiben (Bildschirmtastatur mit Schnellantworten
+  und Kanal-Emotes), Kanälen und Kategorien folgen, gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.
+- **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Schriftgröße,
+  Spoilerschutz, QR-Code, Emotes.
 - **Flüssiger auf langsamen Fernsehern:** Bilder werden erst geladen, wenn sie ins Bild kommen, und in passender Größe.
 
 ## Installation
@@ -72,4 +79,5 @@ Tag `launcher-v*` von GitHub Actions gebaut, signiert und als Release veröffent
 - Ohne Anmeldung zeigt „Live-Kanäle“ höchstens 30 Kanäle (in einer Kategorie 100), und Folgen ist nicht möglich.
   Angemeldet wird über einen Code unter *Einstellungen → Twitch-Konto*.
 - `app/twizen.js` ist die einzige Quelldatei. Der Code ist ES5 ohne CSS-Variablen, damit er auf Tizen 3.0
-  (Chromium 47) läuft.
+  (Chromium 47) läuft. `scripts/check.js` prüft das bei jedem Push (GitHub Actions) und vor jeder Veröffentlichung.
+- QR-Codes: [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) von Kazuhiko Arase (MIT).

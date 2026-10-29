@@ -25,3 +25,6 @@ SOFTWARE.
 
 app/vendor/hls.min.js is hls.js, licensed under the Apache License 2.0
 (see app/vendor/hls.LICENSE.txt).
+
+app/vendor/qrcode.js is qrcode-generator by Kazuhiko Arase, licensed under the MIT license
+(see the header of that file).

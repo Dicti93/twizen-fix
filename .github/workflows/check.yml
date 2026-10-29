@@ -1,0 +1,23 @@
+# Every push: make sure the app still parses as ES5 and only uses what Tizen 3.0 (Chromium 47)
+# supports. TVs pick up new v0.x tags automatically, so a broken release would stop the app there.
+name: Tizen 3 compatibility check
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-save --no-package-lock acorn@8.12.1
+      - run: node scripts/check.js

@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.2';
+TT.VERSION = '0.7.3';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -2503,7 +2503,9 @@ TT.checkService = function () {
     if (lastConv && lastConv.converted) line('Format', 'fMP4 → TS (' + lastConv.converted + ' Stücke umgepackt)');
     if (snd) {
       var ahead = snd.anchored && sndCtx ? Math.max(0, snd.schedEnd - sndCtx.currentTime) : 0;
-      line('Ton', 'von der App' + (snd.anchored ? ', ' + ahead.toFixed(1).replace('.', ',') + ' s vorbereitet' : ', wird vorbereitet'));
+      line('Ton', 'von der App' + (snd.anchored ? ', ' + ahead.toFixed(1).replace('.', ',') + ' s vorbereitet' : ', wird vorbereitet') +
+        (snd.resyncs ? ', ' + snd.resyncs + '× nachsynchronisiert' : '') +
+        (snd.restarts ? ', ' + snd.restarts + '× neu gestartet (zuletzt: ' + snd.lastWhy + ')' : ''));
     }
     if (ctrl) line('Werbeblocker', ctrl.adActive ? 'blockt gerade' : 'aktiv' + (ctrl.blockedCount ? ' · ' + ctrl.blockedCount + '× geblockt' : ''));
     if (speed !== 1) line('Tempo', fmtSpeed(speed));
@@ -2826,7 +2828,7 @@ TT.checkService = function () {
     var tempo = speed !== 1;
     sndFailed = true;
     soundStop();
-    TT.toast(tempo ? 'Bei diesem Tempo gibt es hier leider keinen Ton' : 'Der Kompressor geht hier leider nicht');
+    TT.toast(tempo ? 'Bei diesem Tempo gibt es gerade keinen Ton' : 'Kompressor ausgefallen – Ton wieder ohne Kompressor', 5000);
   }
 
   // Until the own sound starts again, the video's sound plays (at 1x; at other speeds the TV mutes it).
@@ -2873,6 +2875,17 @@ TT.checkService = function () {
       if (ctx.state === 'running' && ctx.suspend) ctx.suspend();
       return;
     }
+    // Watchdog: the picture moves, so some sound must play - the own one, or the video's at 1x.
+    // Otherwise start over; a clock that stands still gets a new AudioContext.
+    var ct = ctx.currentTime;
+    if (ct !== snd.ctxT) { snd.ctxT = ct; snd.ctxAt = ms; }
+    if (!snd.okAt || (!video.muted && snd.speed === 1) ||
+        (snd.anchored && snd.schedEnd > ct && ms - snd.ctxAt < 1000)) snd.okAt = ms;
+    if (ms - snd.okAt > 4000) {
+      var frozen = ms - snd.ctxAt >= 1000;
+      soundRescue(frozen ? 'Tonausgabe stand still' : snd.busy ? 'Entschlüsseln hing' : 'kein Ton vorbereitet', frozen);
+      return;
+    }
     if (ctx.state === 'suspended') { ctx.resume(); return; }
     var now = ctx.currentTime;
     if (snd.anchored) {
@@ -2880,12 +2893,35 @@ TT.checkService = function () {
       else {
         var m = soundMediaAt(now);
         if (m !== null && Math.abs(m - (video.currentTime + soundOffset() * snd.speed)) > 0.15 * Math.max(1, snd.speed)) {
+          snd.resyncs = (snd.resyncs || 0) + 1;
           soundRestart();
           return;
         }
       }
     }
     soundFeed();
+  }
+
+  // Three rescues within a minute: give up and leave the sound to the TV.
+  function soundRescue(why, newContext) {
+    var ms = Date.now();
+    TT.log('sound: ' + why);
+    snd.rescues = (snd.rescues || []).filter(function (t) { return ms - t < 60000; });
+    snd.rescues.push(ms);
+    snd.restarts = (snd.restarts || 0) + 1;
+    snd.lastWhy = why;
+    if (snd.rescues.length >= 3) { soundFail(); return; }
+    if (newContext) {
+      stopBlocks();
+      try { sndCtx.close(); } catch (e) { /* ignore */ }
+      sndCtx = null;
+      if (!soundContext()) { soundFail(); return; }
+      wireCompressor();
+    }
+    soundRestart();
+    snd.okAt = ms;
+    snd.ctxT = -1;
+    snd.ctxAt = ms;
   }
 
   function soundFeed() {

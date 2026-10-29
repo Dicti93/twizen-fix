@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.1';
+TT.VERSION = '0.7.2';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -551,15 +551,20 @@ TT.checkService = function () {
     // Playable MP4 of a clip: { url } (signed with the clip's access token).
     clipSource: function (slug) {
       return gql('query($s:ID!){ clip(slug:$s){ playbackAccessToken(params:{platform:"web", playerBackend:"mediaplayer", ' +
-        'playerType:"site"}){ signature value } videoQualities{ quality sourceURL } } }', { s: slug })
+        'playerType:"site"}){ signature value } videoQualities{ quality frameRate sourceURL } } }', { s: slug })
         .then(function (d) {
           var c = d.clip;
           if (!c || !c.videoQualities || !c.videoQualities.length) throw new Error('Clip nicht verfügbar');
-          var q = c.videoQualities.filter(function (v) { return +v.quality <= 1080; })[0] || c.videoQualities[0];
+          // Twitch doesn't sort the list: take the best version up to 1080p.
+          var q = c.videoQualities.filter(function (v) { return +v.quality <= 1080; })
+            .sort(function (x, y) { return +y.quality - +x.quality || (y.frameRate || 0) - (x.frameRate || 0); })[0] || c.videoQualities[0];
           var t = c.playbackAccessToken, auth = t ? '?sig=' + encodeURIComponent(t.signature) + '&token=' + encodeURIComponent(t.value) : '';
           // The smallest version has the same sound; the player decodes it for other speeds.
           var small = c.videoQualities.slice().sort(function (x, y) { return +x.quality - +y.quality; })[0];
-          return { url: q.sourceURL + auth, soundUrl: small.sourceURL + auth };
+          var all = c.videoQualities.map(function (v) {
+            return { height: +v.quality, fps: v.frameRate || 30, url: v.sourceURL + auth };
+          });
+          return { url: q.sourceURL + auth, soundUrl: small.sourceURL + auth, qualities: all };
         });
     },
 
@@ -2426,7 +2431,9 @@ TT.checkService = function () {
     ctrl = null;
     return TT.api.clipSource(current.clip.slug).then(function (src) {
       if (my !== session) return;
-      video.src = src.url;
+      current.clipQualities = src.qualities || [];
+      current.clipSrc = (speed > 1 && clipUrlForSpeed()) || src.url;
+      video.src = current.clipSrc;
       current.clipUrl = src.soundUrl || src.url;
       video.playbackRate = speed;
       var pr = video.play();
@@ -2449,7 +2456,30 @@ TT.checkService = function () {
     speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
     video.playbackRate = speed;
     TT.toast('Tempo: ' + fmtSpeed(speed));
+    if (current && current.clip) switchClipQuality();
+    else applyCap(true);
     soundUpdate();
+  }
+
+  // The clip version for the current speed (see speedAllows).
+  function clipUrlForSpeed() {
+    var qs = (current.clipQualities || []).slice().sort(function (a, b) { return b.height - a.height || b.fps - a.fps; });
+    var fit = qs.filter(function (q) { return q.height <= 1080 && speedAllows(q.height, q.fps); })[0];
+    return (fit || qs[qs.length - 1] || {}).url || null;
+  }
+
+  function switchClipQuality() {
+    var url = clipUrlForSpeed();
+    if (!url || url === current.clipSrc) return;
+    var t = video.currentTime, paused = video.paused;
+    current.clipSrc = url;
+    video.src = url;
+    video.addEventListener('loadedmetadata', function once() {
+      video.removeEventListener('loadedmetadata', once);
+      video.currentTime = t;
+      video.playbackRate = speed;
+      if (!paused) { var pr = video.play(); if (pr && pr.catch) pr.catch(function () { /* user presses play */ }); }
+    });
   }
 
   // ---- INFO: playback statistics ------------------------------------------------------------
@@ -2588,10 +2618,12 @@ TT.checkService = function () {
         fr.splice(lo, 0, f);
       });
     }
-    // Keep about the last half minute behind the picture.
+    // Keep half a minute behind the picture and (at low qualities hls.js buffers minutes ahead)
+    // at most ~7 minutes in all, dropping what is furthest ahead.
     var keepFrom = (video.currentTime || 0) - 30, cut = 0;
-    while (cut < fr.length && (fr[cut].t < keepFrom || fr.length - cut > 6000)) cut++;
+    while (cut < fr.length && fr[cut].t < keepFrom) cut++;
     if (cut) fr.splice(0, cut);
+    if (fr.length > 20000) fr.length = 20000;
   }
 
   function parseTraf(cap, b, moof, traf, list) {
@@ -2994,14 +3026,32 @@ TT.checkService = function () {
   // of the same stream and ends when the user picks a quality.
   var stalls = [];
 
-  function applyCap() {
-    if (!current || !current.capBitrate || !hls || !hls.levels || !hls.levels.length) return;
-    var cap = -1;
+  // Faster playback means more pictures for the TV's decoder (1080p60 at 1.5x is 90 a second, more
+  // than it manages, and the own sound path needs the processor too). So at higher speeds the
+  // pixels per second stay below 3/4 of 1080p60 at 1x: 720p60 up to 1.5x, 720p30 or 480p at 2x.
+  function speedAllows(height, fps) {
+    if (speed <= 1) return true;
+    return height * height * 16 / 9 * (fps || 30) * speed <= 90e6;
+  }
+
+  function applyCap(flush) {
+    if (!current || !hls || !hls.levels || !hls.levels.length) return;
+    if (!current.capBitrate && speed <= 1) { hls.autoLevelCapping = -1; return; }
+    var cap = -1, lowest = 0;
     hls.levels.forEach(function (l, i) {
-      if ((l.bitrate || 0) <= current.capBitrate && (cap < 0 || l.bitrate > hls.levels[cap].bitrate)) cap = i;
+      if ((l.bitrate || 0) < (hls.levels[lowest].bitrate || 0)) lowest = i;
+      if (current.capBitrate && (l.bitrate || 0) > current.capBitrate) return;
+      if (!speedAllows(l.height || 0, l.frameRate || 30)) return;
+      if (cap < 0 || l.bitrate > hls.levels[cap].bitrate) cap = i;
     });
-    if (cap < 0) cap = 0;
+    if (cap < 0) cap = lowest;
+    var lower = hls.autoLevelCapping < 0 || cap < hls.autoLevelCapping;
     hls.autoLevelCapping = cap;
+    // A lower cap from a speed change should show at once, not after the buffered half minute.
+    var sc = hls.streamController, playing = hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel];
+    if (flush && lower && hls.autoLevelEnabled && playing && playing.bitrate > hls.levels[cap].bitrate && sc && sc.nextLevelSwitch) {
+      sc.nextLevelSwitch();
+    }
     if (!hls.autoLevelEnabled && hls.levels[hls.currentLevel] &&
         hls.levels[hls.currentLevel].bitrate > hls.levels[cap].bitrate) hls.currentLevel = cap;
   }

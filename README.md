@@ -18,11 +18,15 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
   Qualität umschaltbar, geringe Verzögerung, Chat mit Abzeichen und Emotes von 7TV, BTTV und FFZ,
-  Lautstärke-Ausgleich, Statistik auf der INFO-Taste.
+  Lautstärke-Ausgleich, Statistik auf der INFO-Taste. Titel, Kategorie und Zuschauer werden jede Minute aktualisiert.
+- **Stabil bei Aussetzern:** Fällt das Internet aus, wartet die App und spielt danach von selbst weiter (Videos an
+  derselben Stelle). Hakt ein Stream immer wieder, geht sie eine Qualitätsstufe runter. Gesperrte Inhalte
+  (nur für Abonnenten, im Land nicht verfügbar) werden verständlich gemeldet.
 - **Videos und Clips:** Weiterschauen an der letzten Stelle, Chat-Wiedergabe, Kapitel, Vorschaubilder beim Spulen,
   Hype-Momente (Stellen mit viel Chat-Aktivität), Wiedergabetempo bis 2×, Clips laufen nacheinander durch.
 - **Favoriten** (ohne Konto): stehen oben in der Seitenleiste, nur für sie kommt der Hinweis „ist jetzt live“.
-- **Mit Twitch-Konto:** Kanälen folgen und entfolgen, gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.
+- **Mit Twitch-Konto:** im Chat schreiben (Bildschirmtastatur mit Schnellantworten), Kanälen folgen und entfolgen,
+  gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.
 - **Einstellungen:** Sprache der Streams (Standard: Deutsch), Bildqualität, Verzögerung, Chat, Emotes.
 - **Flüssiger auf langsamen Fernsehern:** Bilder werden erst geladen, wenn sie ins Bild kommen, und in passender Größe.
 

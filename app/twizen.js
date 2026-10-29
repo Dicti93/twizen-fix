@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.5.4';
+TT.VERSION = '0.5.5';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -610,6 +610,20 @@ TT.checkService = function () {
             })
           : gql('mutation($id:ID!){ unfollowUser(input:{targetID:$id}){ follow{ followedAt } } }', { id: id })
             .then(function () { return false; });
+      });
+    },
+
+    // Chat message as the signed-in user (the same GQL mutation twitch.tv uses). It comes
+    // back through the normal (anonymous) chat connection like every other message.
+    sendChat: function (login, message) {
+      return api.userId(login).then(function (id) {
+        if (!id) throw new Error('Kanal nicht gefunden');
+        return gql('mutation($i:SendChatMessageInput!){ sendChatMessage(input:$i){ dropReason message{ id } } }',
+          { i: { channelID: id, message: message, nonce: Date.now() + Math.random().toString(36).slice(2, 8) } });
+      }).then(function (d) {
+        var r = d.sendChatMessage || {};
+        if (r.dropReason) throw new Error(r.dropReason);
+        return true;
       });
     },
 
@@ -1940,7 +1954,7 @@ TT.checkService = function () {
   var current = null;        // { stream } live, { vod, owner } video, { vod, owner, clip, clips } clip
   var playlist = [];         // live streams for channel up/down
   var index = 0;
-  var retries = 0, osdTimer = null, pausedAt = 0, saveTimer = null;
+  var retries = 0, osdTimer = null, pausedAt = 0, saveTimer = null, startedAt = 0;
 
   function $(id) { return document.getElementById(id); }
 
@@ -2016,7 +2030,9 @@ TT.checkService = function () {
         callbacks.onSuccess({ url: url, data: out }, self.stats, context, null);
       }).catch(function (err) {
         if (self.aborted) return;
-        callbacks.onError({ code: err.status || 0, text: String(err.message || err) }, context, null, self.stats);
+        // The body carries Twitch's reason (geo block, subscribers only), see blockedReason().
+        callbacks.onError({ code: err.status || 0, text: err.response ? err.response.text : String(err.message || err) },
+          context, null, self.stats);
       });
     };
     Loader.prototype.abort = function () { this.aborted = true; this.stats.aborted = true; };
@@ -2268,6 +2284,7 @@ TT.checkService = function () {
     back: 'M11 6v12L2 12zM21 6v12l-9-6z',
     fwd: 'M13 6v12l9-6zM3 6v12l9-6z',
     chat: 'M4 5h16v11H8l-4 4z',
+    write: 'M4 17v3h3l10-10-3-3zm15-9l-3-3 2-2 3 3z',
     comp: 'M3 9h4l5-5v16l-5-5H3zM15 9h2v6h-2zM19 7h2v10h-2z',
     up: 'M12 4l6 7h-4v9h-4v-9H6z',
     down: 'M12 20l-6-7h4V4h4v9h4z',
@@ -2322,9 +2339,176 @@ TT.checkService = function () {
     return hls.autoLevelEnabled ? 'Auto' + (cur ? ' (' + levelName(cur) + ')' : '') : levelName(cur);
   }
 
+  // ---- automatic quality drop -------------------------------------------------------------
+  // After repeated failures or stalls the stream is capped one level lower (by bitrate; hls.js
+  // keeps its levels sorted by bitrate, so the cap is an index). The cap survives reconnects
+  // of the same stream and ends when the user picks a quality.
+  var stalls = [];
+
+  function applyCap() {
+    if (!current || !current.capBitrate || !hls || !hls.levels || !hls.levels.length) return;
+    var cap = -1;
+    hls.levels.forEach(function (l, i) {
+      if ((l.bitrate || 0) <= current.capBitrate && (cap < 0 || l.bitrate > hls.levels[cap].bitrate)) cap = i;
+    });
+    if (cap < 0) cap = 0;
+    hls.autoLevelCapping = cap;
+    if (!hls.autoLevelEnabled && hls.levels[hls.currentLevel] &&
+        hls.levels[hls.currentLevel].bitrate > hls.levels[cap].bitrate) hls.currentLevel = cap;
+  }
+
+  // Returns false if there is no lower level.
+  function dropQuality() {
+    if (!hls || !hls.levels || !hls.levels.length) return false;
+    var l = hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel];
+    if (!l) return false;
+    var next = null;
+    hls.levels.forEach(function (x) {
+      if ((x.bitrate || 0) < (l.bitrate || 0) && (!next || x.bitrate > next.bitrate)) next = x;
+    });
+    if (!next) return false;
+    current.capBitrate = next.bitrate || 1;
+    TT.toast('Der Stream hakt – Qualität auf ' + levelName(next) + ' gesenkt', 5000);
+    applyCap();
+    return true;
+  }
+
+  // 4 stalls within a minute while playing (not while starting or during blocked ads) -> one level lower.
+  function noteStall() {
+    var now = Date.now();
+    if (video.paused || (ctrl && ctrl.adActive) || !current || current.clip || now - startedAt < 15000) return;
+    stalls = stalls.filter(function (t) { return now - t < 60000; });
+    stalls.push(now);
+    if (stalls.length >= 4) {
+      stalls = [];
+      dropQuality();
+    }
+  }
+
+  // ---- writing in the chat (live, signed in) -----------------------------------------------
+  // On-screen keyboard over the video. Quick replies send at once; the last messages sent
+  // come first. Shift works for one letter, like on a phone, and is on at the start.
+  var compose = null;
+  var QUICK = ['GG', 'LUL', 'Kappa', '<3', 'Hallo!', 'Hahaha'];
+  var COMPOSE_ROWS = ['1234567890ß', 'qwertzuiopü', 'asdfghjklöä', 'yxcvbnm,.!?'];
+
+  function upper(ch) { return ch === 'ß' ? ch : ch.toUpperCase(); }
+
+  function composeUpdate() {
+    compose.textEl.textContent = compose.text || 'Nachricht an den Chat';
+    compose.textEl.className = 'search-text' + (compose.text ? '' : ' placeholder');
+    compose.keys.forEach(function (k) { k.el.textContent = compose.shift ? upper(k.ch) : k.ch; });
+    compose.shiftEl.classList.toggle('on', compose.shift);
+  }
+
+  function composeType(str) {
+    if (compose.text.length + str.length > 500) return;
+    compose.text += str;
+    compose.shift = false;
+    composeUpdate();
+  }
+
+  function composeDelete() {
+    compose.text = compose.text.slice(0, -1);
+    if (!compose.text) compose.shift = true;
+    composeUpdate();
+  }
+
+  // Twitch's reasons for not delivering a message.
+  function chatDropText(reason) {
+    var r = String(reason || '');
+    if (/FOLLOW/i.test(r)) return 'Hier dürfen gerade nur Follower schreiben';
+    if (/SUB/i.test(r)) return 'Hier dürfen gerade nur Abonnenten schreiben';
+    if (/EMOTE/i.test(r)) return 'Gerade sind nur Emotes erlaubt';
+    if (/SLOW/i.test(r)) return 'Langsamer Modus: kurz warten und noch einmal senden';
+    if (/DUPLICATE|R9K|UNIQUE/i.test(r)) return 'Dieselbe Nachricht geht nicht zweimal hintereinander';
+    if (/BAN|TIMED|TIMEOUT/i.test(r)) return 'Du bist in diesem Chat gerade gesperrt';
+    if (/VERIF|PHONE|EMAIL/i.test(r)) return 'Dieser Kanal verlangt ein bestätigtes Twitch-Konto';
+    if (/AUTOMOD|HELD/i.test(r)) return 'AutoMod hat die Nachricht zurückgehalten';
+    if (/RATE|LIMIT|FAST/i.test(r)) return 'Zu schnell – kurz warten';
+    if (/unauthenticated|unauthorized/i.test(r)) return 'Bitte unter Einstellungen neu bei Twitch anmelden';
+    return 'Nachricht nicht gesendet (' + r + ')';
+  }
+
+  function sendCompose(text) {
+    var login = TT.player.currentLogin();
+    text = String(text || '').replace(/^\s+|\s+$/g, '');
+    if (!compose || compose.busy || !text || !login) return;
+    compose.busy = true;
+    compose.textEl.textContent = 'Wird gesendet …';
+    TT.api.sendChat(login, text).then(function () {
+      var recent = (TT.store.get('chatRecent', []) || []).filter(function (t) { return t !== text; });
+      TT.store.set('chatRecent', [text].concat(recent).slice(0, 3));
+      if (TT.chat.label() === 'Aus') TT.chat.cycle();
+      TT.toast('Gesendet');
+      closeCompose();
+    }, function (e) {
+      if (!compose) return;
+      compose.busy = false;
+      composeUpdate();
+      TT.toast(chatDropText(e.message || e), 5000);
+    });
+  }
+
+  function openCompose() {
+    if (!TT.player.currentLogin()) return;
+    if (!TT.api.auth.current()) { TT.toast('Zum Schreiben unter Einstellungen bei Twitch anmelden'); return; }
+    closeCompose();
+    hideOsd();
+    var el = TT.el('div', '');
+    el.id = 'compose';
+    var box = TT.el('div', 'search-box');
+    var textEl = TT.el('span', 'search-text');
+    box.appendChild(textEl);
+    box.appendChild(TT.el('span', 'caret'));
+    el.appendChild(box);
+    compose = { el: el, text: '', shift: true, textEl: textEl, keys: [], busy: false };
+
+    var quick = TT.el('div', 'keyrow compose-quick');
+    var recent = TT.store.get('chatRecent', []) || [];
+    recent.concat(QUICK.filter(function (q) { return recent.indexOf(q) < 0; })).slice(0, 8).forEach(function (q) {
+      quick.appendChild(TT.focusable(TT.el('div', 'key', q), function () { sendCompose(q); }));
+    });
+    el.appendChild(quick);
+
+    var first = null;
+    COMPOSE_ROWS.forEach(function (keys) {
+      var r = TT.el('div', 'keyrow');
+      keys.split('').forEach(function (ch) {
+        var k = TT.focusable(TT.el('div', 'key', ch), function () { composeType(compose.shift ? upper(ch) : ch); });
+        compose.keys.push({ ch: ch, el: k });
+        if (!first && ch === 'q') first = k;
+        r.appendChild(k);
+      });
+      el.appendChild(r);
+    });
+    var actions = TT.el('div', 'keyrow');
+    compose.shiftEl = TT.focusable(TT.el('div', 'key mid', '⇧ Groß'), function () {
+      compose.shift = !compose.shift;
+      composeUpdate();
+    });
+    actions.appendChild(compose.shiftEl);
+    actions.appendChild(TT.focusable(TT.el('div', 'key wide', 'Leerzeichen'), function () { composeType(' '); }));
+    actions.appendChild(TT.focusable(TT.el('div', 'key mid', '⌫'), composeDelete));
+    actions.appendChild(TT.focusable(TT.el('div', 'key wide send', 'Senden'), function () { sendCompose(compose.text); }));
+    el.appendChild(actions);
+    el.appendChild(TT.el('div', 'compose-hint', 'Oben: sofort senden  ·  Zurück: abbrechen'));
+    $('player').appendChild(el);
+    composeUpdate();
+    TT.focus.set(first);
+  }
+
+  function closeCompose() {
+    if (!compose) return;
+    if (compose.el.parentNode) compose.el.parentNode.removeChild(compose.el);
+    compose = null;
+  }
+
   // Auto -> highest -> ... -> lowest -> Auto, for this stream only.
   function cycleQuality() {
     if (!hls || !hls.levels || !hls.levels.length) return;
+    if (current) current.capBitrate = 0;
+    hls.autoLevelCapping = -1;
     var order = hls.levels.map(function (l, i) { return i; }).sort(function (a, b) {
       var la = hls.levels[a], lb = hls.levels[b];
       return (lb.height - la.height) || ((lb.bitrate || 0) - (la.bitrate || 0));
@@ -2359,6 +2543,7 @@ TT.checkService = function () {
       list.push({ icon: 'next', label: 'Nächster Clip', fn: function () { switchClip(1); } });
     }
     if (!isClip) list.push({ icon: 'chat', label: 'Chat: ' + TT.chat.label(), fn: function () { TT.chat.cycle(); } });
+    if (!isVod && TT.api.auth.current()) list.push({ icon: 'write', label: 'Schreiben', fn: openCompose });
     if (!isVod) list.push({ icon: 'start', label: 'Von Anfang an', fn: watchFromStart });
     if (isVod) list.push({ icon: 'speed', label: 'Tempo: ' + fmtSpeed(speed), fn: cycleSpeed });
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
@@ -2540,6 +2725,90 @@ TT.checkService = function () {
     $('osd-uptime').textContent = s.createdAt ? 'seit ' + TT.fmtUptime(s.createdAt) : '';
   }
 
+  // Live: title, category, viewers and uptime in the OSD are refreshed every minute.
+  var infoTimer = null;
+
+  function refreshLiveInfo() {
+    var s = current && current.stream;
+    if (!s) return;
+    TT.api.channel(s.broadcaster.login).then(function (u) {
+      if (!current || current.stream !== s || !u || !u.stream) return;
+      var oldGame = s.game ? s.game.displayName : '', game = u.stream.game ? u.stream.game.displayName : '';
+      s.title = u.stream.title;
+      s.game = u.stream.game;
+      s.viewersCount = u.stream.viewersCount;
+      if (u.stream.createdAt) s.createdAt = u.stream.createdAt;
+      if (oldGame && game && game !== oldGame) {
+        TT.toast((s.broadcaster.displayName || s.broadcaster.login) + ' ist jetzt in ' + game, 5000);
+      }
+      fillLiveOsd(s);
+    }).catch(function () { /* keep what we have */ });
+  }
+
+  function stopInfoTimer() { clearInterval(infoTimer); infoTimer = null; }
+
+  // ---- connection loss and readable errors -------------------------------------------------
+  // A tiny image from Twitch's CDN tells "no internet" apart from a problem with the stream
+  // (requests through the local service fail with 502 either way).
+  function checkOnline(cb) {
+    var img = new Image(), done = false;
+    var timer = setTimeout(function () { finish(false); }, 4000);
+    function finish(ok) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      img.onload = img.onerror = null;
+      cb(ok);
+    }
+    img.onload = function () { finish(true); };
+    img.onerror = function () { finish(false); };
+    img.src = 'https://static-cdn.jtvnw.net/jtv-static/404_preview-10x10.png?' + Date.now();
+  }
+
+  // Waits (without giving up) until the internet is back, then calls then().
+  function waitForNetwork(my, then) {
+    setStatus('Keine Internetverbindung – warte auf Verbindung …');
+    (function poll() {
+      checkOnline(function (ok) {
+        if (my !== session) return;
+        if (!ok) { setTimeout(function () { if (my === session) poll(); }, 3000); return; }
+        TT.toast('Verbindung ist wieder da');
+        then();
+      });
+    })();
+  }
+
+  // Playlist answers Twitch uses for blocked content, e.g.
+  // [{"error":"Content Restricted In Region","error_code":"content_geoblocked"}].
+  function blockedReason(code, body) {
+    var s = String(body || ''), what = current && current.vod ? 'Dieses Video' : 'Dieser Stream';
+    if (/geoblock|restricted in region/i.test(s)) return what + ' ist in deinem Land nicht verfügbar';
+    if (/vod_manifest_restricted|unauthorized_entitlements|subscri/i.test(s)) return what + ' ist nur für Abonnenten des Kanals';
+    if (code === 404 && current && current.vod) return 'Dieses Video gibt es nicht mehr';
+    return null;
+  }
+
+  function failText(details) {
+    var what = /manifest|level/i.test(details || '') ? 'konnte nicht geladen werden'
+      : /frag/i.test(details || '') ? 'kommt gerade nicht an' : 'ist fehlgeschlagen';
+    return (current && current.vod ? 'Das Video ' : 'Der Stream ') + what +
+      '. Mit Zurück schließen und noch einmal öffnen.';
+  }
+
+  function isNetworkError(err) {
+    return !err.status ? /^(Network error|Timeout)$/.test(String(err.message)) : err.status >= 502;
+  }
+
+  // Reconnect; videos continue where they were.
+  function restart() {
+    if (current && current.vod && !current.clip && video.currentTime > 0) {
+      savePos();
+      current.startAt = Math.floor(video.currentTime);
+      current.startDone = false;
+    }
+    play(true);
+  }
+
   // Replaces the <video> element (needed if Web Audio captured it and turned out silent).
   function replaceVideo() {
     var fresh = document.createElement('video');
@@ -2608,6 +2877,7 @@ TT.checkService = function () {
         });
         hls.currentLevel = pick >= 0 ? pick : lowest;
       }
+      applyCap();
       if (isVod && current.startAt > 30) TT.toast('Weiter bei ' + fmtTime(current.startAt));
       video.playbackRate = speed;
       var p = video.play();
@@ -2625,29 +2895,46 @@ TT.checkService = function () {
       if (!video.paused || !pausedAt) setStatus('');
     });
     hls.on(Hls.Events.ERROR, function (ev, data) {
-      if (!data.fatal || my !== session) return;
+      if (my !== session) return;
+      if (!data.fatal) {
+        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) noteStall();
+        return;
+      }
       TT.log('hls fatal error', data.type, data.details);
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 3) {
         retries++;
         hls.recoverMediaError();
         return;
       }
-      var offline = !isVod && data.response && data.response.code === 404;
-      if (offline) {
+      var code = data.response && data.response.code;
+      if (!isVod && code === 404) {
         setStatus('Der Stream ist offline');
         destroyHls();
-        if (!isVod) { checkRaid(true); offerRecording(); }
+        checkRaid(true);
+        offerRecording();
         return;
       }
-      if (retries < 4) {
-        retries++;
-        setStatus('Verbinde neu …');
-        if (isVod) savePos();
-        setTimeout(function () { if (my === session) play(true); }, 2000 * retries);
-      } else {
-        setStatus('Wiedergabe fehlgeschlagen (' + data.details + ')');
+      var reason = blockedReason(code, data.response && data.response.text);
+      if (reason) {
+        setStatus(reason);
         destroyHls();
+        return;
       }
+      // Without internet: wait for it, however long. Otherwise retry, from the second
+      // attempt one quality level lower.
+      checkOnline(function (ok) {
+        if (my !== session) return;
+        if (!ok) { waitForNetwork(my, restart); return; }
+        if (retries < 4) {
+          retries++;
+          if (retries >= 2) dropQuality();
+          setStatus('Verbinde neu …');
+          setTimeout(function () { if (my === session) restart(); }, 2000 * retries);
+        } else {
+          setStatus(failText(data.details));
+          destroyHls();
+        }
+      });
     });
     hls.attachMedia(video);
     hls.loadSource(src);
@@ -2677,7 +2964,8 @@ TT.checkService = function () {
       var info = {};
       try { info = JSON.parse(token.value); } catch (e) { /* ignore */ }
       if (info.authorization && info.authorization.forbidden) {
-        throw new Error('Dieser Stream ist nicht verfügbar: ' + (info.authorization.reason || 'gesperrt'));
+        throw new Error(blockedReason(0, info.authorization.reason) ||
+          'Dieser Stream ist nicht verfügbar: ' + (info.authorization.reason || 'gesperrt'));
       }
       var src = TT.api.usherUrl(login, token);
       return TT.loadHls().then(function () { if (my === session) startHls(my, ctrl, src, false); });
@@ -2692,6 +2980,7 @@ TT.checkService = function () {
       var src = TT.api.vodUsherUrl(vod.id, token);
       return TT.loadHls().then(function () { if (my === session) startHls(my, null, src, true); });
     }, function (err) {
+      if (isNetworkError(err)) throw err;
       throw new Error('Dieses Video ist nicht verfügbar (' + (err.message || err) + '). Vielleicht nur für Abonnenten.');
     });
   }
@@ -2699,11 +2988,17 @@ TT.checkService = function () {
   function play(keepRetries) {
     var my = ++session;
     destroyHls();
-    if (!keepRetries) retries = 0;
+    if (!keepRetries) { retries = 0; stalls = []; }
+    startedAt = Date.now();
     var p = current.clip ? playClip(my) : current.vod ? playVod(my, current.vod) : playLive(my, current.stream);
     p.catch(function (err) {
       if (my !== session) return;
-      setStatus(String(err.message || err));
+      if (!isNetworkError(err)) { setStatus(String(err.message || err)); return; }
+      checkOnline(function (ok) {
+        if (my !== session) return;
+        if (ok) setStatus('Twitch ist gerade nicht erreichbar. Mit Zurück schließen und später noch einmal öffnen.');
+        else waitForNetwork(my, restart);
+      });
     });
   }
 
@@ -2765,6 +3060,16 @@ TT.checkService = function () {
         if (i >= 0 && i < list.length - 1) TT.player.openClip(list[i + 1], list);
       }
     });
+    // Clips play as plain MP4, without hls.js and its error handling.
+    video.addEventListener('error', function () {
+      if (!current || !current.clip) return;
+      var my = session;
+      checkOnline(function (ok) {
+        if (my !== session) return;
+        if (ok) setStatus('Der Clip konnte nicht abgespielt werden');
+        else waitForNetwork(my, restart);
+      });
+    });
   }
 
   TT.player = {
@@ -2776,6 +3081,7 @@ TT.checkService = function () {
 
     open: function (stream, list) {
       hideOsd();
+      closeCompose();
       cancelScrub();
       current = { stream: stream };
       speed = 1;
@@ -2791,21 +3097,19 @@ TT.checkService = function () {
       TT.recent.add(stream.broadcaster);
       startRaidWatch();
       loadFollowState();
-      // Refresh title/viewers in the OSD.
-      TT.api.channel(stream.broadcaster.login).then(function (u) {
-        if (!current || current.stream !== stream || !u || !u.stream) return;
-        u.stream.broadcaster = { login: u.login, displayName: u.displayName, profileImageURL: u.profileImageURL };
-        if (u.stream.createdAt) stream.createdAt = u.stream.createdAt;
-        fillLiveOsd(u.stream);
-      }).catch(function () { /* keep what we have */ });
+      stopInfoTimer();
+      refreshLiveInfo();
+      infoTimer = setInterval(refreshLiveInfo, 60000);
     },
 
     // vod: { id, title, lengthSeconds, publishedAt, game }; owner: { login, displayName, profileImageURL }
     // opts.fromStart: ignore the saved position (e.g. "Von Anfang an").
     openVod: function (vod, owner, opts) {
       hideOsd();
+      closeCompose();
       cancelScrub();
       stopRaidWatch();
+      stopInfoTimer();
       if (current && current.vod && !current.clip) savePos();
       var pos = opts && opts.fromStart ? 0 : TT.vodPos(vod.id);
       current = { vod: vod, owner: owner, startAt: pos > 30 ? pos : 0 };
@@ -2829,8 +3133,10 @@ TT.checkService = function () {
     // Clip (MP4) from `list`; the next one follows automatically when it ends.
     openClip: function (clip, list) {
       hideOsd();
+      closeCompose();
       cancelScrub();
       stopRaidWatch();
+      stopInfoTimer();
       TT.chat.close();
       clearInterval(saveTimer);
       var owner = clip.broadcaster || {};
@@ -2851,6 +3157,8 @@ TT.checkService = function () {
 
     close: function () {
       stopRaidWatch();
+      closeCompose();
+      stopInfoTimer();
       if (statsTimer) toggleStats();
       cancelScrub();
       hideOsd();
@@ -2876,6 +3184,12 @@ TT.checkService = function () {
 
     // Returns true if the key was handled. `repeat` is true while a key is held down.
     key: function (k, repeat) {
+      if (compose) {
+        if (k === 'back') closeCompose();
+        else if (k === 'left' || k === 'right' || k === 'up' || k === 'down') TT.focus.move(k);
+        else if (k === 'enter') TT.focus.activate();
+        return true;
+      }
       var isVod = !!(current && current.vod);
       switch (k) {
         case 'back':
@@ -2903,7 +3217,7 @@ TT.checkService = function () {
           if (!osdVisible) { showOsd(); return true; }
           if (row === 'scrub') { if (scrub.active) commitScrub(); else togglePause(); return true; }
           if (buttons[btnIndex]) buttons[btnIndex].fn();
-          if (current) showOsd();
+          if (current && !compose) showOsd();
           return true;
         case 'rewind':
         case 'ff':
@@ -2935,6 +3249,14 @@ TT.checkService = function () {
           switchStream(k === 'chup' ? -1 : 1);
           return true;
       }
+      return false;
+    },
+
+    // Physical keyboard (desktop testing / USB keyboards) while writing in the chat.
+    typeKey: function (e) {
+      if (!compose) return false;
+      if (e.keyCode === 8) { composeDelete(); return true; }
+      if (e.key && e.key.length === 1) { composeType(e.key); return true; }
       return false;
     },
 
@@ -4035,7 +4357,7 @@ TT.checkService = function () {
       }
       var a = TT.api.auth.current();
       var loginBox = TT.el('div', 'login-panel');
-      row('Twitch-Konto', a ? 'OK drücken zum Abmelden' : 'Für „Folge ich“ und deine Kanäle in der Seitenleiste',
+      row('Twitch-Konto', a ? 'OK drücken zum Abmelden' : 'Für „Folge ich“, deine Kanäle in der Seitenleiste und zum Schreiben im Chat',
         function () { return a ? 'Angemeldet als ' + (a.displayName || a.login) : 'Nicht angemeldet'; },
         function () {
           if (a) {
@@ -4306,6 +4628,8 @@ TT.checkService = function () {
 
     // Search screen: physical keyboard typing (Backspace deletes there).
     if (!inPlayer && view && view.el.typeKey && view.el.typeKey(e)) { e.preventDefault(); return; }
+
+    if (inPlayer && TT.player.typeKey(e)) { e.preventDefault(); return; }
 
     var k = KEYS[e.keyCode] || (inPlayer ? PLAYER_LETTERS[e.keyCode] : null);
     if (!k) return;

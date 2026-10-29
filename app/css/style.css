@@ -310,6 +310,20 @@ body.zap #player { left: 15rem; }
 .vod-only { display: none; }
 #player.is-vod .live-only { display: none; }
 #player.is-clip #chat { display: none; }
+
+/* writing in the chat */
+#compose {
+  position: absolute; left: 50%; bottom: 2rem; transform: translateX(-50%); z-index: 5;
+  background: rgba(14, 14, 16, 0.94); padding: 1.2rem 1.4rem 0.8rem; border-radius: 0.6rem;
+}
+#compose .search-box { max-width: none; }
+#compose .compose-quick { margin-bottom: 0.8rem; }
+#compose .compose-quick .key { width: auto; padding: 0 1rem; font-size: 1rem; background: #3a3a3d; }
+#compose .key.mid { width: 7rem; font-size: 1rem; }
+#compose .key.on { background: #bf94ff; color: #0e0e10; }
+#compose .key.send { background: #772ce8; }
+#compose .key.focused { background: #9147ff; color: #fff; box-shadow: 0 0 0 0.15rem #fff; }
+.compose-hint { color: #adadb8; font-size: 0.85rem; margin-top: 0.5rem; text-align: center; }
 .osd-progress { display: none; align-items: center; margin-bottom: 0.6rem; padding: 0.4rem 0.6rem; border-radius: 0.5rem; border: 0.15rem solid transparent; }
 #player.is-vod .osd-progress { display: flex; }
 .osd-progress.row-focused { border-color: #bf94ff; background: rgba(145, 71, 255, 0.15); }

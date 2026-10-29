@@ -8,9 +8,9 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 - **Läuft auf älteren Fernsehern (Tizen 3.0):** Streams und Videos im fMP4-Format („Enhanced Broadcasting“) werden vor
   der Wiedergabe in MPEG-TS umgepackt. Ohne das bleibt das Bild bei solchen Kanälen schwarz.
 - **Oberfläche auf Deutsch im Twitch-Stil:**
-  - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, deine Kategorien, Weiterschauen, „Was habe ich
-    verpasst?“ mit den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien); sie lädt sich
-    neu, wenn man nach ein paar Minuten zurückkommt
+  - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, Weiterschauen, „Was habe ich verpasst?“ mit
+    den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien, ganz unten deine gefolgten
+    Kategorien); sie lädt sich neu, wenn man nach ein paar Minuten zurückkommt
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
     neu gestartet), die Auswahl bleibt gespeichert; 100 Kategorien mit Clips der Woche
   - TV-Programm: geplante Streams der Kanäle, denen du folgst, als Wochenübersicht
@@ -20,7 +20,8 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
   Qualität umschaltbar, etwa 6 s hinter live, Knopf „Neu laden“, Lautstärke-Ausgleich, Statistik auf der INFO-Taste.
   Titel, Kategorie und Zuschauer werden jede Minute aktualisiert. Werbepausen laufen über eine werbefreie Quelle in
-  voller Qualität weiter.
+  voller Qualität weiter. Die Steuerleiste ist eine Reihe mit den wichtigsten Knöpfen (Pause, Chat, Schreiben,
+  Folgen; bei Videos ±1 Min., Kapitel, Hype-Moment), der Rest steckt im Menü „Mehr“.
 - **Chat:** Abzeichen und Emotes von 7TV, BTTV und FFZ, passend zum Bild verzögert (keine Spoiler), Abos, Raids und
   Ankündigungen, Hervorhebung von Erwähnungen und eigenen Nachrichten, einstellbare Schriftgröße, QR-Code zum
   Mitschreiben am Handy.
@@ -64,7 +65,9 @@ Tag `launcher-v*` von GitHub Actions gebaut, signiert und als Release veröffent
 | Taste | Übersicht | Player |
 | --- | --- | --- |
 | OK | Öffnen | Steuerleiste zeigen / Knopf drücken |
-| Zurück | Ins Menü, dann beenden | Seitenleiste einklappen, Steuerleiste ausblenden, dann schließen |
+| ◄ / ► | | In der Steuerleiste wechseln (Videos ohne Leiste: spulen) |
+| ▲ / ▼ | | Im Menü „Mehr“ wählen (Videos: ▲ zur Zeitleiste, ▼ zurück zu den Knöpfen) |
+| Zurück | Ins Menü, dann beenden | „Mehr“ schließen, Seitenleiste einklappen, Steuerleiste ausblenden, dann schließen |
 | Gelb | Kanalseite der Kachel | Kanalseite |
 | Rot | | Chat: Seite / überlagert / aus |
 | Grün | | Lautstärke-Ausgleich |

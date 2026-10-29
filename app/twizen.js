@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.0';
+TT.VERSION = '0.7.1';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -556,8 +556,10 @@ TT.checkService = function () {
           var c = d.clip;
           if (!c || !c.videoQualities || !c.videoQualities.length) throw new Error('Clip nicht verfügbar');
           var q = c.videoQualities.filter(function (v) { return +v.quality <= 1080; })[0] || c.videoQualities[0];
-          var t = c.playbackAccessToken;
-          return { url: q.sourceURL + (t ? '?sig=' + encodeURIComponent(t.signature) + '&token=' + encodeURIComponent(t.value) : '') };
+          var t = c.playbackAccessToken, auth = t ? '?sig=' + encodeURIComponent(t.signature) + '&token=' + encodeURIComponent(t.value) : '';
+          // The smallest version has the same sound; the player decodes it for other speeds.
+          var small = c.videoQualities.slice().sort(function (x, y) { return +x.quality - +y.quality; })[0];
+          return { url: q.sourceURL + auth, soundUrl: small.sourceURL + auth };
         });
     },
 
@@ -706,6 +708,14 @@ TT.checkService = function () {
           if (!t) throw new Error('No playback token for this video');
           return t;
         });
+    },
+
+    // Path of a VOD's files on the CDN, taken from its seek previews (null if unknown).
+    vodCdnBase: function (id) {
+      return gql('query($id:ID!){ video(id:$id){ seekPreviewsURL } }', { id: id }).then(function (d) {
+        var url = (d.video && d.video.seekPreviewsURL) || '', cut = url.indexOf('/storyboards/');
+        return cut > 0 ? url.slice(0, cut) : null;
+      });
     },
 
     vodUsherUrl: function (id, token) {
@@ -1121,11 +1131,13 @@ TT.checkService = function () {
 /* ---- audio.js ---- */
 ;// Compressor setting (Aus / Leicht / Nacht). The player applies it on its own sound path
 // (see "own sound path" in player.js): the TV gives Web Audio no samples from the video.
+// Chrome's compressor adds make-up gain of its own; makeupDb is chosen (measured on Twitch
+// speech) so loud parts stay as loud as with Aus and quiet parts come up by ~3 / ~7 dB.
 (function () {
   var PRESETS = {
     off: null,
-    light: { label: 'Leicht', threshold: -24, ratio: 3, knee: 12, attack: 0.01, release: 0.25, makeupDb: 3 },
-    night: { label: 'Nacht', threshold: -40, ratio: 12, knee: 6, attack: 0.003, release: 0.25, makeupDb: 8 }
+    light: { label: 'Leicht', threshold: -24, ratio: 3, knee: 12, attack: 0.01, release: 0.25, makeupDb: -4 },
+    night: { label: 'Nacht', threshold: -40, ratio: 12, knee: 6, attack: 0.003, release: 0.25, makeupDb: -2 }
   };
   var ORDER = ['off', 'light', 'night'];
   var mode = TT.store.get('compressor', 'off');
@@ -2151,7 +2163,11 @@ TT.checkService = function () {
 
   function $(id) { return document.getElementById(id); }
 
+  // Master playlists the app already has (usher's answer, or one written for the CDN fallback).
+  var knownPlaylists = {};
+
   function fetchText(url) {
+    if (knownPlaylists.hasOwnProperty(url)) return Promise.resolve(knownPlaylists[url]);
     return TT.http('GET', url, { proxy: true }).then(function (r) { return r.text; });
   }
 
@@ -2411,7 +2427,7 @@ TT.checkService = function () {
     return TT.api.clipSource(current.clip.slug).then(function (src) {
       if (my !== session) return;
       video.src = src.url;
-      current.clipUrl = src.url;
+      current.clipUrl = src.soundUrl || src.url;
       video.playbackRate = speed;
       var pr = video.play();
       if (pr && pr.catch) pr.catch(function () { /* user presses play */ });
@@ -2638,7 +2654,7 @@ TT.checkService = function () {
   // Every chunk is decoded with a few frames of the previous one in front (an AAC frame needs its
   // predecessor) and lined up with the previous chunk's end by correlation.
   function HlsSound() { this.reset(); }
-  HlsSound.prototype.reset = function () { this.tail = null; this.endT = -1; this.delay = 0; };
+  HlsSound.prototype.reset = function () { this.tail = null; this.endT = -1; this.delay = 0; this.gen = (this.gen || 0) + 1; };
   // cb(chunk) with { t0, chs, rate } starting at media time t, cb(null) if the frames aren't there yet.
   HlsSound.prototype.read = function (ctx, t, dur, cb) {
     var fr = aud.frames, lo = 0, hi = fr.length, self = this;
@@ -2653,12 +2669,14 @@ TT.checkService = function () {
     while (first > 0 && i0 - first < 3 && fr[first].t - (fr[first - 1].t + fr[first - 1].d) < 0.002) first--;
     var list = fr.slice(first, i1), lastDur = fr[i1 - 1].d, startT = list[0].t;
     var data = muxFrames(aud, list);
-    var cont = this.tail && Math.abs(t - this.endT) < 1e-6;
+    // A reset() while decoding makes this result stale (and drops the tail).
+    var gen = this.gen, tail = this.tail, cont = tail && Math.abs(t - this.endT) < 1e-6;
     try {
       ctx.decodeAudioData(data.buffer, function (ab) {
+        if (gen !== self.gen) { cb(null); return; }
         var R = ab.sampleRate, p = Math.round((t - startT) * R + self.delay * R);
         if (cont) {
-          var al = alignTail(self.tail, ab.getChannelData(0), p);
+          var al = alignTail(tail, ab.getChannelData(0), p);
           if (al !== null) { p = al; self.delay = p / R - (t - startT); }
         }
         var end = ab.length - (atEnd && i1 >= fr.length ? 0 : Math.round(lastDur * R));
@@ -2688,7 +2706,7 @@ TT.checkService = function () {
     return best > 0.6 ? bestQ + L : null;
   }
 
-  // Clips are short: fetch the MP4 once more and decode its sound as a whole.
+  // Clips are short: fetch the MP4 once more (its smallest version) and decode its sound as a whole.
   var clipPcm = { url: null, buf: null, loading: false, failed: false };
   function ClipSound() {}
   ClipSound.prototype.reset = function () {};
@@ -2770,7 +2788,6 @@ TT.checkService = function () {
     stopBlocks();
     clearInterval(snd.timer);
     snd = null;
-    video.muted = false;
   }
 
   function soundFail() {
@@ -2780,11 +2797,14 @@ TT.checkService = function () {
     TT.toast(tempo ? 'Bei diesem Tempo gibt es hier leider keinen Ton' : 'Der Kompressor geht hier leider nicht');
   }
 
+  // Until the own sound starts again, the video's sound plays (at 1x; at other speeds the TV mutes it).
   function stopBlocks() {
     snd.blocks.forEach(function (b) { try { b.node.stop(0); } catch (e) { /* ended */ } });
     snd.blocks = [];
     snd.anchored = false;
     snd.schedEnd = 0;
+    clearTimeout(snd.muteTimer);
+    video.muted = false;
   }
 
   function soundRestart() {
@@ -2797,7 +2817,6 @@ TT.checkService = function () {
     snd.feedT = null;
     snd.outT = 0;
     snd.busy = false;
-    video.muted = true;
   }
 
   // Media time the own sound plays at ctx time `now`, or null between blocks.
@@ -2814,7 +2833,11 @@ TT.checkService = function () {
     var ctx = sndCtx;
     if (video.seeking) { if (!snd.seekWait) { snd.seekWait = true; stopBlocks(); } return; }
     if (snd.seekWait) { snd.seekWait = false; soundRestart(); }
-    if (video.paused || video.readyState < 3) {
+    // Hold the sound while the picture doesn't move (paused, buffering). Not by readyState:
+    // the TV reports odd states at other speeds.
+    var vt = video.currentTime, ms = Date.now();
+    if (vt !== snd.lastT || !snd.movedAt) { snd.lastT = vt; snd.movedAt = ms; }
+    if (video.paused || ms - snd.movedAt > 500) {
       if (ctx.state === 'running' && ctx.suspend) ctx.suspend();
       return;
     }
@@ -2874,6 +2897,8 @@ TT.checkService = function () {
       if (start < earliest) { skip = Math.ceil((earliest - start) * rate); start = earliest; }
       if (skip >= n) return;
       snd.anchored = true;
+      clearTimeout(snd.muteTimer);
+      snd.muteTimer = setTimeout(function () { if (snd) video.muted = true; }, Math.max(0, (start - now) * 1000));
     } else start = snd.schedEnd;
     var len = n - skip, buf = ctx.createBuffer(chs.length, len, rate);
     for (var c = 0; c < chs.length; c++) buf.getChannelData(c).set(skip ? chs[c].subarray(skip) : chs[c]);
@@ -3688,14 +3713,77 @@ TT.checkService = function () {
   function playVod(my, vod) {
     setStatus('Video wird geladen …');
     ctrl = null;
-    return TT.api.vodToken(vod.id).then(function (token) {
-      if (my !== session) return;
-      var src = TT.api.vodUsherUrl(vod.id, token);
-      return TT.loadHls().then(function () { if (my === session) startHls(my, null, src, true); });
-    }, function (err) {
+    return TT.api.vodToken(vod.id).then(null, function (err) {
       if (isNetworkError(err)) throw err;
       throw new Error('Dieses Video ist nicht verfügbar (' + (err.message || err) + '). Vielleicht nur für Abonnenten.');
+    }).then(function (token) {
+      if (my !== session) return;
+      return vodSource(vod.id, token).then(function (src) {
+        if (my !== session) return;
+        return TT.loadHls().then(function () { if (my === session) startHls(my, null, src, true); });
+      });
     });
+  }
+
+  // Twitch's usher at times answers every VOD request with error 500 (seen in October 2026).
+  // The playlists are also on the CDN without a token, under the path of the VOD's seek
+  // previews; then the app writes the master playlist itself.
+  var CDN_LEVELS = [['chunked', 1920, 1080, 60, 8000000], ['1080p60', 1920, 1080, 60, 6000000],
+    ['1080p30', 1920, 1080, 30, 4500000], ['720p60', 1280, 720, 60, 3500000], ['720p30', 1280, 720, 30, 2500000],
+    ['480p30', 852, 480, 30, 1400000], ['360p30', 640, 360, 30, 700000], ['160p30', 284, 160, 30, 250000]];
+
+  function vodSource(id, token) {
+    var usher = TT.api.vodUsherUrl(id, token);
+    return TT.http('GET', usher, { proxy: true }).then(function (r) {
+      knownPlaylists = {};
+      knownPlaylists[usher] = r.text;
+      return usher;
+    }, function (err) {
+      if (!err.status) throw err;
+      TT.log('usher ' + err.status + ', VOD from the CDN');
+      return vodCdnMaster(id).then(function (master) {
+        if (!master) throw new Error('Twitch liefert dieses Video gerade nicht aus (Fehler ' + err.status + ').');
+        var url = 'https://usher.ttvnw.net/vod/' + encodeURIComponent(id) + '.m3u8?twizen=cdn';
+        knownPlaylists = {};
+        knownPlaylists[url] = master;
+        return url;
+      });
+    });
+  }
+
+  function vodCdnMaster(id) {
+    return TT.api.vodCdnBase(id).then(function (base) {
+      if (!base) return [];
+      return Promise.all(CDN_LEVELS.map(function (l) {
+        var url = base + '/' + l[0] + '/index-dvr.m3u8';
+        return fetchText(url).then(function (text) { return { l: l, url: url, text: text }; }, function () { return null; });
+      }));
+    }).then(function (found) {
+      found = found.filter(Boolean);
+      var real1080 = found.some(function (f) { return f.l[0] !== 'chunked' && f.l[2] === 1080; });
+      return Promise.all(found.map(function (f) {
+        if (f.l[0] !== 'chunked') return f;
+        if (real1080) return null;
+        return isHevc(f).then(function (h) { return h ? null : f; });
+      }));
+    }).then(function (found) {
+      found = found.filter(Boolean);
+      if (!found.length) return null;
+      return ['#EXTM3U'].concat(found.map(function (f) {
+        var l = f.l;
+        return '#EXT-X-STREAM-INF:BANDWIDTH=' + l[4] + ',RESOLUTION=' + l[1] + 'x' + l[2] + ',FRAME-RATE=' + l[3] + '.000\n' + f.url;
+      })).join('\n');
+    });
+  }
+
+  // The source rendition ("chunked") can be HEVC (Enhanced Broadcasting), which these TVs can't
+  // play. MPEG-TS on Twitch is always H.264; fMP4 tells by its init segment.
+  function isHevc(f) {
+    var m = /#EXT-X-MAP:URI="([^"]+)"/.exec(f.text);
+    if (!m) return Promise.resolve(false);
+    return TT.http('GET', absolute(m[1], f.url), { proxy: true }).then(function (r) {
+      return /hvc1|hev1/.test(r.text);
+    }, function () { return false; });
   }
 
   function play(keepRetries) {

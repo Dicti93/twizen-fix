@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.6.3';
+TT.VERSION = '0.6.4';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -2628,51 +2628,121 @@ TT.checkService = function () {
     }
     var parts = [pick[0].init];
     pick.forEach(function (f) { parts = parts.concat(f.chunks); });
-    var data = concatBytes(parts);
-    var at = testLine(my, '2. Tonspur wird entschlüsselt …');
+    var orig = concatBytes(parts), lc = initAsLc(pick[0].init);
+    parts[0] = lc || pick[0].init;
+    var fixed = concatBytes(parts);
     my.timer = setTimeout(function () {
-      var t0 = Date.now();
-      try {
-        ctx.decodeAudioData(data.buffer, function (ab) {
-          var ms = Date.now() - t0;
-          testLine(my, '2. Tonspur entschlüsselt: ' + testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')', at);
-          stretchStep(my, ab);
-        }, function (err) {
-          testLine(my, '2. Entschlüsseln fehlgeschlagen (' + audioCap.codec + '): ' + ((err && err.message) || err || 'ohne Meldung'), at);
+      testDecode(my, '2. Wie vom Player gekennzeichnet (' + audioCap.codec + ')', orig, function (A) {
+        testDecode(my, '3. Korrigiert auf AAC-LC' + (lc ? '' : ' (Aufbau unbekannt, unverändert)'), fixed, function (B) {
+          testPlayAll(my, A, B);
         });
-      } catch (e) {
-        testLine(my, '2. Entschlüsseln fehlgeschlagen (' + audioCap.codec + '): ' + e, at);
-      }
+      });
     }, 1000);
   }
 
-  function stretchStep(my, ab) {
-    var ctx = my.ctx, at = testLine(my, '3. Wird auf 1,5× beschleunigt (normale Stimme) …');
-    my.timer = setTimeout(function () {
+  function readU32(b, o) { return b[o] * 16777216 + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]; }
+  function writeU32(b, o, v) { b[o] = (v >>> 24) & 255; b[o + 1] = (v >>> 16) & 255; b[o + 2] = (v >>> 8) & 255; b[o + 3] = v & 255; }
+
+  // hls.js labels Twitch's AAC-LC as HE-AAC (object type 5, "SBR") on Chrome-like browsers. The
+  // video chip ignores that, but the TV's software decoder then applies SBR and the voice comes
+  // out distorted and low. Returns a copy of the audio init segment with a plain LC config.
+  function initAsLc(init) {
+    var names = ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd', 'mp4a', 'esds'];
+    var skip = { stsd: 8, mp4a: 28 }, path = [], off = 0, end = init.length;
+    for (var level = 0; level < names.length; level++) {
+      var found = -1;
+      while (off + 8 <= end) {
+        var size = readU32(init, off);
+        var type = String.fromCharCode(init[off + 4], init[off + 5], init[off + 6], init[off + 7]);
+        if (size < 8 || off + size > end) return null;
+        if (type === names[level]) { found = off; break; }
+        off += size;
+      }
+      if (found < 0) return null;
+      path.push(found);
+      end = found + readU32(init, found);
+      off = found + 8 + (skip[names[level]] || 0);
+    }
+    // esds: full box header, then 03 len ES_ID flags | 04 len (13 bytes) | 05 len config
+    var e = path[path.length - 1] + 12;
+    if (init[e] !== 3 || init[e + 1] > 127 || init[e + 5] !== 4 || init[e + 6] > 127 || init[e + 20] !== 5 || init[e + 21] !== 4) return null;
+    var c0 = init[e + 22], c1 = init[e + 23];
+    if (c0 >> 3 === 2) return init;
+    if (c0 >> 3 !== 5) return null;
+    var si = ((c0 & 7) << 1) | (c1 >> 7), ch = (c1 >> 3) & 15;
+    var out = new Uint8Array(init.length - 2);
+    out.set(init.subarray(0, e + 22));
+    out[e + 22] = (2 << 3) | (si >> 1);
+    out[e + 23] = ((si & 1) << 7) | (ch << 3);
+    out.set(init.subarray(e + 26), e + 24);
+    out[e + 1] -= 2;
+    out[e + 6] -= 2;
+    out[e + 21] = 2;
+    for (var j = 0; j < path.length; j++) writeU32(out, path[j], readU32(init, path[j]) - 2);
+    return out;
+  }
+
+  function testDecode(my, label, data, next) {
+    var at = testLine(my, label + ': wird entschlüsselt …'), t0 = Date.now();
+    function done(ab, msg) {
       if (test !== my) return;
-      var chs = [], c;
-      for (c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c));
-      var t0 = Date.now(), out = TT.stretch(chs, ab.sampleRate, 1.5), ms = Date.now() - t0;
-      testLine(my, '3. Auf 1,5× beschleunigt: ' + testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')', at);
-      var n = Math.min(out[0].length, Math.round(10 * ab.sampleRate));
-      var buf = ctx.createBuffer(chs.length, n, ab.sampleRate);
-      for (c = 0; c < chs.length; c++) buf.getChannelData(c).set(out[c].subarray(0, n));
-      video.muted = true;
-      var src = my.src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      var start = ctx.currentTime + 0.2, wall0 = Date.now() + 200;
-      src.start(start);
-      var playAt = testLine(my, '4. Spielt ' + testSecs(n / ab.sampleRate) + ' mit 1,5× (Video ist so lange stumm) …');
-      src.onended = function () {
-        if (test !== my) return;
+      testLine(my, label + ': ' + msg, at);
+      next(ab);
+    }
+    try {
+      my.ctx.decodeAudioData(data.buffer, function (ab) {
+        var ms = Date.now() - t0;
+        done(ab, testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')');
+      }, function (err) { done(null, 'fehlgeschlagen ' + ((err && err.message) || err || '')); });
+    } catch (e) {
+      done(null, 'fehlgeschlagen ' + e);
+    }
+  }
+
+  // Plays A (as labelled) and B (corrected) at normal speed, then B 1.5x at the same pitch.
+  function testPlayAll(my, A, B) {
+    var steps = [];
+    if (A) steps.push({ text: 'Probe A: wie gekennzeichnet, normales Tempo', ab: A, speed: 1, secs: 4 });
+    if (B) steps.push({ text: 'Probe B: korrigiert, normales Tempo', ab: B, speed: 1, secs: 4 });
+    if (B || A) steps.push({ text: 'Probe C: korrigiert, 1,5× mit normaler Stimme', ab: B || A, speed: 1.5, secs: 8 });
+    video.muted = true;
+    testLine(my, '');
+    var i = 0;
+    (function next() {
+      if (test !== my) return;
+      var st = steps[i++];
+      if (!st) {
         video.muted = my.muted;
-        testLine(my, '4. Abgespielt: Audio-Uhr ' + testSecs(ctx.currentTime - start) + ', echte Zeit ' +
-          testSecs((Date.now() - wall0) / 1000), playAt);
         testLine(my, '');
-        testLine(my, 'Hast du den Piepton und die schnelle Stimme gehört? Klang es sauber?');
-      };
-    }, 100);
+        testLine(my, 'Welche Proben (A, B, C) klangen normal, welche verzerrt?');
+        return;
+      }
+      var at = testLine(my, '▶ ' + st.text + ' …');
+      my.timer = setTimeout(function () {
+        if (test !== my) return;
+        var ab = st.ab, chs = [], c, extra = '';
+        for (c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c));
+        if (st.speed !== 1) {
+          var t0 = Date.now();
+          chs = TT.stretch(chs, ab.sampleRate, st.speed);
+          var ms = Date.now() - t0;
+          extra = ' (beschleunigt: ' + testFactor(ab.duration, ms) + ')';
+        }
+        var n = Math.min(chs[0].length, Math.round(st.secs * ab.sampleRate));
+        var buf = my.ctx.createBuffer(chs.length, n, ab.sampleRate);
+        for (c = 0; c < chs.length; c++) buf.getChannelData(c).set(chs[c].subarray(0, n));
+        var src = my.src = my.ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(my.ctx.destination);
+        src.onended = function () {
+          if (test !== my) return;
+          testLine(my, '✓ ' + st.text + extra, at);
+          my.timer = setTimeout(next, 800);
+        };
+        testLine(my, '▶ ' + st.text + extra + '  ← läuft', at);
+        src.start(my.ctx.currentTime + 0.1);
+      }, 100);
+    })();
   }
 
   function toggleStats() {

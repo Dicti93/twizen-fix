@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.6.0';
+TT.VERSION = '0.6.1';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -3658,6 +3658,20 @@ TT.checkService = function () {
       if (i >= 0 && i < cards.length) { set(cards[i]); return; }
       if (dir === 'right') return;
     }
+    // In the sidebar's scrolling lists, up/down walk the entries in order: entries scrolled
+    // out of view sit geometrically behind the fixed menu, so spatial search would jump
+    // into the menu too early. Only the first entry hands over to the menu.
+    var lists = (dir === 'up' || dir === 'down') && current.closest('.side-lists');
+    if (lists) {
+      var entries = [].filter.call(lists.querySelectorAll('.focusable'), visible);
+      var j = entries.indexOf(current) + (dir === 'down' ? 1 : -1);
+      if (j >= 0 && j < entries.length) {
+        set(entries[j]);
+        if (j === 0) lists.scrollTop = 0; // show the heading above the first entry too
+        return;
+      }
+      if (dir === 'down') return;
+    }
     var c = current.getBoundingClientRect();
     var best = null, bestScore = Infinity;
     for (var i = 0; i < list.length; i++) {
@@ -4308,15 +4322,6 @@ TT.checkService = function () {
           el.appendChild(carousel('Live-Kanäle', ', denen du folgst',
             followed.map(function (s) { return streamCard(s, followed); })));
         }
-        // Categories you follow that are live right now.
-        if (signedIn) {
-          var catSlot = TT.el('div');
-          el.appendChild(catSlot);
-          TT.api.followedGames().then(function (games) {
-            if (games.length) catSlot.appendChild(carousel('Deine', ' Kategorien', games.map(function (g) { return categoryCard(g); })));
-            TT.lazy();
-          }).catch(function () { /* optional row */ });
-        }
         // Videos started but not finished.
         var cont = TT.watched.list().filter(function (w) { return TT.vodPos(w.vod.id) > 30; });
         if (cont.length) {
@@ -4363,6 +4368,15 @@ TT.checkService = function () {
           if (games.length) cats.appendChild(carousel('Kategorien', ', die dir gefallen könnten', games.slice(0, 20).map(categoryCard)));
           TT.lazy();
         }).catch(function () { /* the rest of the page still works */ });
+        // Categories you follow that are live right now, as the last row.
+        if (signedIn) {
+          var catSlot = TT.el('div');
+          el.appendChild(catSlot);
+          TT.api.followedGames().then(function (games) {
+            if (games.length) catSlot.appendChild(carousel('Deine', ' Kategorien', games.map(function (g) { return categoryCard(g); })));
+            TT.lazy();
+          }).catch(function () { /* optional row */ });
+        }
         return first;
       }, 'Gerade ist niemand live');
     },

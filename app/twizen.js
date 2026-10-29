@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.6.2';
+TT.VERSION = '0.6.3';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -1257,6 +1257,55 @@ TT.checkService = function () {
   };
 })();
 
+/* ---- stretch.js ---- */
+;// WSOLA time stretch: plays `channels` (Float32Array[]) `speed` times faster at the same pitch.
+// Frames of 40 ms with 50 % Hann overlap; each frame's start is searched within ±12 ms for the
+// best match with the natural continuation of the previous frame (coarse on a decimated mono
+// mix, then fine).
+(function () {
+  TT.stretch = function (channels, sr, speed) {
+    var N = Math.round(0.040 * sr) & ~1, Hs = N / 2, Ha = Hs * speed, S = Math.round(0.012 * sr);
+    var len = channels[0].length, nch = channels.length;
+    var outLen = Math.floor(len / speed), out = [], c, i;
+    for (c = 0; c < nch; c++) out.push(new Float32Array(outLen + N));
+    var mono = new Float32Array(len);
+    for (c = 0; c < nch; c++) for (i = 0; i < len; i++) mono[i] += channels[c][i];
+    var win = new Float32Array(N);
+    for (i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+
+    function score(a, b, step) {
+      var sum = 0, ea = 1e-9, eb = 1e-9, x, y;
+      for (var k = 0; k < Hs; k += step) { x = mono[a + k]; y = mono[b + k]; sum += x * y; ea += x * x; eb += y * y; }
+      return sum / Math.sqrt(ea * eb);
+    }
+
+    var prev = 0, pos = 0;
+    for (var o = 0, k = 0; o < outLen; o += Hs, k++) {
+      var nominal = Math.round(k * Ha);
+      if (k > 0) {
+        var target = prev + Hs, best = nominal, bestS = -2, d, sc;
+        var lo = Math.max(0, nominal - S), hi = Math.min(len - N - 1, nominal + S);
+        if (hi < lo || target + Hs >= len) break;
+        for (d = lo; d <= hi; d += 4) { sc = score(target, d, 4); if (sc > bestS) { bestS = sc; best = d; } }
+        var coarse = best;
+        for (d = Math.max(lo, coarse - 3); d <= Math.min(hi, coarse + 3); d++) {
+          sc = score(target, d, 2);
+          if (sc > bestS) { bestS = sc; best = d; }
+        }
+        pos = best;
+      }
+      if (pos + N > len) break;
+      for (c = 0; c < nch; c++) {
+        var src = channels[c], dst = out[c];
+        for (i = 0; i < N; i++) dst[o + i] += src[pos + i] * win[i];
+      }
+      prev = pos;
+    }
+    for (c = 0; c < nch; c++) out[c] = out[c].subarray(0, outLen);
+    return out;
+  };
+})();
+
 /* ---- chat.js ---- */
 ;// Read-only Twitch chat over anonymous IRC WebSocket.
 (function () {
@@ -2473,6 +2522,159 @@ TT.checkService = function () {
     if (speed !== 1) line('Tempo', fmtSpeed(speed));
     el.textContent = lines.join('\n');
   }
+  // ---- sound test (temporary) ---------------------------------------------------------------
+  // Checks whether this TV can play the sound itself: hls.js appends the audio as its own fMP4
+  // track; the newest fragments are kept, decoded with Web Audio and played 1.5x at the same pitch.
+  var audioCap = { init: null, codec: '', frags: [] }, test = null;
+
+  function captureAudio(h) {
+    var cap = audioCap = { init: null, codec: '', frags: [] };
+    h.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, function (e, d) {
+      var init = d.tracks && d.tracks.audio && d.tracks.audio.initSegment;
+      if (init) {
+        // hls.js sends a fresh copy on every quality switch; keep the old one if the bytes match,
+        // so fragments before and after the switch can be decoded together.
+        if (!sameBytes(init, cap.init)) cap.init = init;
+        cap.codec = d.tracks.audio.codec || '';
+      }
+    });
+    h.on(Hls.Events.BUFFER_APPENDING, function (e, d) {
+      if (d.type !== 'audio' || !cap.init || !d.frag) return;
+      // The init segment itself (ftyp box) is appended too; only moof/mdat are kept.
+      var b = d.data;
+      if (b.length > 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) return;
+      var list = cap.frags, last = list[list.length - 1];
+      if (!last || last.sn !== d.frag.sn || last.init !== cap.init) {
+        last = { sn: d.frag.sn, dur: d.frag.duration || 0, init: cap.init, chunks: [] };
+        list.push(last);
+        if (list.length > 12) list.shift();
+      }
+      last.chunks.push(new Uint8Array(d.data));
+    });
+  }
+
+  function sameBytes(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  function concatBytes(parts) {
+    var n = 0, i, o = 0;
+    for (i = 0; i < parts.length; i++) n += parts[i].length;
+    var out = new Uint8Array(n);
+    for (i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].length; }
+    return out;
+  }
+
+  function testSecs(x) { return x.toFixed(1).replace('.', ',') + ' s'; }
+  function testFactor(dur, ms) { return ms > 0 ? Math.round(dur * 1000 / ms) + '× schneller als nötig' : 'sofort'; }
+  function testLine(my, text, at) {
+    if (test !== my) return -1;
+    if (at >= 0) my.lines[at] = text; else my.lines.push(text);
+    $('audiotest').textContent = my.lines.join('\n');
+    return at >= 0 ? at : my.lines.length - 1;
+  }
+
+  function closeAudioTest() {
+    if (!test) return;
+    var my = test;
+    test = null;
+    if (my.timer) clearTimeout(my.timer);
+    if (my.src) { try { my.src.stop(); } catch (e) { /* not started */ } }
+    if (my.ctx && my.ctx.close) { try { my.ctx.close(); } catch (e2) { /* ignore */ } }
+    video.muted = my.muted;
+    var box = $('audiotest');
+    if (box) box.style.display = 'none';
+  }
+
+  function runAudioTest() {
+    closeAudioTest();
+    hideOsd();
+    var box = $('audiotest');
+    if (!box) {
+      box = TT.el('pre', '');
+      box.id = 'audiotest';
+      $('stats').parentNode.appendChild(box);
+    }
+    box.style.display = 'block';
+    var my = test = { lines: [], muted: video.muted };
+    testLine(my, 'Tontest ' + TT.VERSION + '   (Zurück schließt ihn)');
+    testLine(my, '');
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { testLine(my, '1. Web Audio fehlt'); return; }
+    try { my.ctx = new AC(); } catch (e) { testLine(my, '1. Web Audio startet nicht: ' + e); return; }
+    var ctx = my.ctx;
+    if (ctx.resume) ctx.resume();
+    var osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.frequency.value = 660;
+    g.gain.value = 0.25;
+    osc.connect(g);
+    g.connect(ctx.destination);
+    osc.start(ctx.currentTime + 0.1);
+    osc.stop(ctx.currentTime + 0.8);
+    testLine(my, '1. Piepton gespielt (' + ctx.sampleRate + ' Hz, ' + (ctx.state || '?') + ')');
+
+    // The newest complete fragments (the very last one may still be appending), up to ~16 s.
+    var list = audioCap.frags.slice(0, -1), pick = [], dur = 0;
+    for (var i = list.length - 1; i >= 0 && dur < 16; i--) {
+      if (pick.length && list[i].init !== pick[0].init) break;
+      pick.unshift(list[i]);
+      dur += list[i].dur;
+    }
+    if (!pick.length) {
+      testLine(my, '2. Noch kein Ton mitgeschnitten: Video oder Stream ein paar Sekunden laufen lassen und nochmal starten');
+      return;
+    }
+    var parts = [pick[0].init];
+    pick.forEach(function (f) { parts = parts.concat(f.chunks); });
+    var data = concatBytes(parts);
+    var at = testLine(my, '2. Tonspur wird entschlüsselt …');
+    my.timer = setTimeout(function () {
+      var t0 = Date.now();
+      try {
+        ctx.decodeAudioData(data.buffer, function (ab) {
+          var ms = Date.now() - t0;
+          testLine(my, '2. Tonspur entschlüsselt: ' + testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')', at);
+          stretchStep(my, ab);
+        }, function (err) {
+          testLine(my, '2. Entschlüsseln fehlgeschlagen (' + audioCap.codec + '): ' + ((err && err.message) || err || 'ohne Meldung'), at);
+        });
+      } catch (e) {
+        testLine(my, '2. Entschlüsseln fehlgeschlagen (' + audioCap.codec + '): ' + e, at);
+      }
+    }, 1000);
+  }
+
+  function stretchStep(my, ab) {
+    var ctx = my.ctx, at = testLine(my, '3. Wird auf 1,5× beschleunigt (normale Stimme) …');
+    my.timer = setTimeout(function () {
+      if (test !== my) return;
+      var chs = [], c;
+      for (c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c));
+      var t0 = Date.now(), out = TT.stretch(chs, ab.sampleRate, 1.5), ms = Date.now() - t0;
+      testLine(my, '3. Auf 1,5× beschleunigt: ' + testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')', at);
+      var n = Math.min(out[0].length, Math.round(10 * ab.sampleRate));
+      var buf = ctx.createBuffer(chs.length, n, ab.sampleRate);
+      for (c = 0; c < chs.length; c++) buf.getChannelData(c).set(out[c].subarray(0, n));
+      video.muted = true;
+      var src = my.src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      var start = ctx.currentTime + 0.2, wall0 = Date.now() + 200;
+      src.start(start);
+      var playAt = testLine(my, '4. Spielt ' + testSecs(n / ab.sampleRate) + ' mit 1,5× (Video ist so lange stumm) …');
+      src.onended = function () {
+        if (test !== my) return;
+        video.muted = my.muted;
+        testLine(my, '4. Abgespielt: Audio-Uhr ' + testSecs(ctx.currentTime - start) + ', echte Zeit ' +
+          testSecs((Date.now() - wall0) / 1000), playAt);
+        testLine(my, '');
+        testLine(my, 'Hast du den Piepton und die schnelle Stimme gehört? Klang es sauber?');
+      };
+    }, 100);
+  }
+
   function toggleStats() {
     var el = $('stats');
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; el.style.display = 'none'; return; }
@@ -2811,6 +3013,7 @@ TT.checkService = function () {
       list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () { TT.player.onChannelPage(login); }, more: true });
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor, more: true, stay: true });
+    if (!isClip) list.push({ icon: 'speed', label: 'Tontest', fn: runAudioTest, more: true });
     return list;
   }
 
@@ -3137,6 +3340,7 @@ TT.checkService = function () {
   }
 
   function destroyHls() {
+    closeAudioTest();
     if (hls) { try { hls.destroy(); } catch (e) { /* ignore */ } }
     hls = null;
   }
@@ -3178,6 +3382,7 @@ TT.checkService = function () {
       return loaderCtrl ? loaderCtrl.mapFor(url) : (vodMaps[url] || null);
     }, conv, function (e) { TT.log('fmp4->ts failed', e); });
     hls = new Hls(cfg);
+    captureAudio(hls);
     lastConv = conv;
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
       // Fixed quality from Settings: the best level at or below the chosen height.
@@ -3500,6 +3705,7 @@ TT.checkService = function () {
 
     // Returns true if the key was handled. `repeat` is true while a key is held down.
     key: function (k, repeat) {
+      if (test && k === 'back') { closeAudioTest(); return true; }
       if (compose) {
         if (k === 'back') closeCompose();
         else if (k === 'left' || k === 'right' || k === 'up' || k === 'down') TT.focus.move(k);

@@ -30,7 +30,11 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   Qualitätsstufe runter. Gesperrte Inhalte
   (nur für Abonnenten, im Land nicht verfügbar) werden verständlich gemeldet.
 - **Videos und Clips:** Weiterschauen an der letzten Stelle, Chat-Wiedergabe, Kapitel, Vorschaubilder beim Spulen,
-  Hype-Momente (Stellen mit viel Chat-Aktivität), Wiedergabetempo bis 2×, Clips laufen nacheinander durch.
+  Hype-Momente (Stellen mit viel Chat-Aktivität), Wiedergabetempo bis 2× mit Ton in normaler Stimmlage, Clips laufen
+  nacheinander durch.
+- **Eigene Tonwiedergabe:** Der Videochip älterer Fernseher schaltet bei anderem Tempo den Ton stumm und lässt keinen
+  Lautstärke-Ausgleich zu. Bei Tempo ≠ 1× oder eingeschaltetem Ausgleich spielt die App den Ton deshalb selbst ab: Sie
+  entschlüsselt die Tonspur per Web Audio, beschleunigt sie ohne Tonhöhenänderung (WSOLA) und hält sie synchron zum Bild.
 - **Favoriten** (ohne Konto): stehen oben in der Seitenleiste, nur für sie kommt der Hinweis „ist jetzt live“.
 - **Mit Twitch-Konto** (Anmeldung per Code oder QR-Code): im Chat schreiben (Bildschirmtastatur mit Schnellantworten
   und Kanal-Emotes), Kanälen und Kategorien folgen, gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.

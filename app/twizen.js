@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.6.4';
+TT.VERSION = '0.7.0';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -1119,12 +1119,8 @@ TT.checkService = function () {
 })(typeof window !== 'undefined' ? window : this);
 
 /* ---- audio.js ---- */
-;// Toggleable dynamic range compressor:
-// video -> MediaElementSource -> DynamicsCompressor -> makeup Gain -> destination.
-// The Web Audio graph is only created the first time the user turns it on, because once a
-// <video> is routed into Web Audio its sound only comes out through the graph. If the TV's
-// Web Audio doesn't get samples from hardware-decoded video, we detect silence, report it
-// as unsupported, and the player swaps in a fresh <video> element.
+;// Compressor setting (Aus / Leicht / Nacht). The player applies it on its own sound path
+// (see "own sound path" in player.js): the TV gives Web Audio no samples from the video.
 (function () {
   var PRESETS = {
     off: null,
@@ -1132,178 +1128,117 @@ TT.checkService = function () {
     night: { label: 'Nacht', threshold: -40, ratio: 12, knee: 6, attack: 0.003, release: 0.25, makeupDb: 8 }
   };
   var ORDER = ['off', 'light', 'night'];
-
-  var ctx = null, source = null, comp = null, gain = null, analyser = null, boundVideo = null;
   var mode = TT.store.get('compressor', 'off');
   if (!PRESETS.hasOwnProperty(mode)) mode = 'off';
-  // Session-only: a stored flag once disabled the compressor forever after one quiet stream.
-  var unsupported = false;
-  TT.store.set('compressorUnsupported', false);
 
-  function supported() {
-    return !unsupported && !!(window.AudioContext || window.webkitAudioContext);
-  }
-
-  function ensureGraph(video) {
-    if (ctx && boundVideo === video) return true;
-    try {
-      if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-      source = ctx.createMediaElementSource(video);
-      comp = ctx.createDynamicsCompressor();
-      gain = ctx.createGain();
-      analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048;
-      comp.connect(gain);
-      boundVideo = video;
-      return true;
-    } catch (e) {
-      TT.log('compressor: graph setup failed', e);
-      markUnsupported();
-      return false;
-    }
-  }
-
-  function markUnsupported() {
-    unsupported = true;
-  }
-
-  function wire() {
-    if (!source) return;
-    try { source.disconnect(); } catch (e) { /* not connected */ }
-    try { gain.disconnect(); } catch (e2) { /* not connected */ }
-    var p = PRESETS[mode];
-    if (p) {
-      comp.threshold.value = p.threshold;
-      comp.ratio.value = p.ratio;
-      comp.knee.value = p.knee;
-      comp.attack.value = p.attack;
-      comp.release.value = p.release;
-      gain.gain.value = Math.pow(10, p.makeupDb / 20);
-      source.connect(comp);
-      gain.connect(analyser);
-      gain.connect(ctx.destination);
-    } else {
-      source.connect(analyser);
-      source.connect(ctx.destination);
-    }
-  }
-
-  // Checks over ~10 s of actual playback that real samples flow through the graph; calls
-  // onFail() if silent. Buffering, pauses and a suspended context don't count as playback.
-  function verify(video, onFail) {
-    var buf = new Uint8Array(analyser.fftSize);
-    var my = analyser, checks = 0, heard = false, lastTime = -1;
-    var timer = setInterval(function () {
-      if (analyser !== my) { clearInterval(timer); return; }
-      var t = video.currentTime, advancing = t !== lastTime;
-      lastTime = t;
-      if (!advancing || video.paused || video.muted || video.volume === 0 ||
-          video.readyState < 3 || ctx.state !== 'running') {
-        if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
-        return;
-      }
-      analyser.getByteTimeDomainData(buf);
-      for (var i = 0; i < buf.length; i++) if (Math.abs(buf[i] - 128) > 2) { heard = true; break; }
-      checks++;
-      if (heard) { clearInterval(timer); return; }
-      if (checks >= 40) {
-        clearInterval(timer);
-        TT.log('compressor: no audio through Web Audio, disabling');
-        markUnsupported();
-        onFail();
-      }
-    }, 250);
-  }
+  function supported() { return !!(window.AudioContext || window.webkitAudioContext); }
 
   TT.audio = {
     mode: function () { return mode; },
     label: function () { return PRESETS[mode] ? PRESETS[mode].label : 'Aus'; },
+    preset: function () { return PRESETS[mode]; },
     supported: supported,
-    // True when `video` is routed through Web Audio (it must keep the graph).
-    isBound: function (video) { return boundVideo === video; },
-
-    // Called by the player once playback starts.
-    attach: function (video, onFail) {
-      if (mode === 'off' && boundVideo !== video) return;
-      if (!supported()) return;
-      var fresh = boundVideo !== video;
-      if (!ensureGraph(video)) return;
-      if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
-      wire();
-      if (fresh) verify(video, onFail);
-    },
-
     // Cycles Off -> Light -> Night. Returns the new label, or null if unsupported.
-    cycle: function (video, onFail) {
+    cycle: function () {
       if (!supported()) return null;
       mode = ORDER[(ORDER.indexOf(mode) + 1) % ORDER.length];
       TT.store.set('compressor', mode);
-      if (video && (mode !== 'off' || boundVideo === video)) {
-        var fresh = boundVideo !== video;
-        if (!ensureGraph(video)) { onFail(); return null; }
-        if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
-        wire();
-        if (fresh) verify(video, onFail);
-      }
       return TT.audio.label();
-    },
-
-    // The player replaced its <video>; the old graph is useless.
-    reset: function () {
-      source = comp = gain = analyser = boundVideo = null;
-      if (ctx && ctx.close) { try { ctx.close(); } catch (e) { /* ignore */ } }
-      ctx = null;
     }
   };
 })();
 
 /* ---- stretch.js ---- */
-;// WSOLA time stretch: plays `channels` (Float32Array[]) `speed` times faster at the same pitch.
+;// Streaming WSOLA time stretch: plays audio `speed` times faster at the same pitch.
 // Frames of 40 ms with 50 % Hann overlap; each frame's start is searched within ±12 ms for the
 // best match with the natural continuation of the previous frame (coarse on a decimated mono
-// mix, then fine).
+// mix, then fine). Output sample j belongs to input sample j * speed (within ±12 ms).
 (function () {
-  TT.stretch = function (channels, sr, speed) {
-    var N = Math.round(0.040 * sr) & ~1, Hs = N / 2, Ha = Hs * speed, S = Math.round(0.012 * sr);
-    var len = channels[0].length, nch = channels.length;
-    var outLen = Math.floor(len / speed), out = [], c, i;
-    for (c = 0; c < nch; c++) out.push(new Float32Array(outLen + N));
-    var mono = new Float32Array(len);
-    for (c = 0; c < nch; c++) for (i = 0; i < len; i++) mono[i] += channels[c][i];
-    var win = new Float32Array(N);
-    for (i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+  function Stretcher(nch, sr, speed) {
+    this.N = Math.round(0.040 * sr) & ~1;
+    this.Hs = this.N / 2;
+    this.Ha = this.Hs * speed;
+    this.S = Math.round(0.012 * sr);
+    this.inp = [];
+    this.acc = [];
+    for (var c = 0; c < nch; c++) { this.inp.push(new Float32Array(0)); this.acc.push(new Float32Array(this.N)); }
+    this.mono = new Float32Array(0);
+    this.base = 0;   // absolute input index of inp[0]
+    this.next = 0;   // nominal absolute input position of the next frame
+    this.prev = -1;  // absolute input position of the previous frame
+    this.win = new Float32Array(this.N);
+    for (var i = 0; i < this.N; i++) this.win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / this.N);
+  }
 
-    function score(a, b, step) {
-      var sum = 0, ea = 1e-9, eb = 1e-9, x, y;
-      for (var k = 0; k < Hs; k += step) { x = mono[a + k]; y = mono[b + k]; sum += x * y; ea += x * x; eb += y * y; }
-      return sum / Math.sqrt(ea * eb);
+  function join(a, b) {
+    var out = new Float32Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  }
+
+  Stretcher.prototype.score = function (a, b, step) {
+    var m = this.mono, sum = 0, ea = 1e-9, eb = 1e-9, x, y;
+    a -= this.base;
+    b -= this.base;
+    for (var k = 0; k < this.Hs; k += step) { x = m[a + k]; y = m[b + k]; sum += x * y; ea += x * x; eb += y * y; }
+    return sum / Math.sqrt(ea * eb);
+  };
+
+  // Takes new input channels, returns the output that is complete so far.
+  Stretcher.prototype.process = function (chs) {
+    var nch = this.inp.length, c, i, n = chs[0].length;
+    var mono = new Float32Array(n);
+    for (c = 0; c < nch; c++) {
+      this.inp[c] = join(this.inp[c], chs[c]);
+      for (i = 0; i < n; i++) mono[i] += chs[c][i];
     }
-
-    var prev = 0, pos = 0;
-    for (var o = 0, k = 0; o < outLen; o += Hs, k++) {
-      var nominal = Math.round(k * Ha);
-      if (k > 0) {
-        var target = prev + Hs, best = nominal, bestS = -2, d, sc;
-        var lo = Math.max(0, nominal - S), hi = Math.min(len - N - 1, nominal + S);
-        if (hi < lo || target + Hs >= len) break;
-        for (d = lo; d <= hi; d += 4) { sc = score(target, d, 4); if (sc > bestS) { bestS = sc; best = d; } }
+    this.mono = join(this.mono, mono);
+    var N = this.N, Hs = this.Hs, S = this.S, pieces = [];
+    for (;;) {
+      var end = this.base + this.inp[0].length, nominal = Math.round(this.next), pos = nominal;
+      if (nominal + S + N > end) break;
+      if (this.prev >= 0) {
+        var target = this.prev + Hs, best = nominal, bestS = -2, d, sc;
+        var lo = Math.max(this.base, nominal - S), hi = Math.min(end - N, nominal + S);
+        if (target + Hs > end) break;
+        for (d = lo; d <= hi; d += 4) { sc = this.score(target, d, 4); if (sc > bestS) { bestS = sc; best = d; } }
         var coarse = best;
         for (d = Math.max(lo, coarse - 3); d <= Math.min(hi, coarse + 3); d++) {
-          sc = score(target, d, 2);
+          sc = this.score(target, d, 2);
           if (sc > bestS) { bestS = sc; best = d; }
         }
         pos = best;
       }
-      if (pos + N > len) break;
+      var piece = [];
       for (c = 0; c < nch; c++) {
-        var src = channels[c], dst = out[c];
-        for (i = 0; i < N; i++) dst[o + i] += src[pos + i] * win[i];
+        var src = this.inp[c], acc = this.acc[c], off = pos - this.base;
+        for (i = 0; i < N; i++) acc[i] += src[off + i] * this.win[i];
+        piece.push(new Float32Array(acc.subarray(0, Hs)));
+        acc.set(acc.subarray(Hs), 0);
+        for (i = N - Hs; i < N; i++) acc[i] = 0;
       }
-      prev = pos;
+      pieces.push(piece);
+      this.prev = pos;
+      this.next += this.Ha;
     }
-    for (c = 0; c < nch; c++) out[c] = out[c].subarray(0, outLen);
+    // Drop input that no future frame can reach.
+    var keep = Math.min(this.prev, Math.round(this.next) - S) - this.base;
+    if (keep > 0) {
+      for (c = 0; c < nch; c++) this.inp[c] = this.inp[c].subarray(keep);
+      this.mono = this.mono.subarray(keep);
+      this.base += keep;
+    }
+    var out = [];
+    for (c = 0; c < nch; c++) {
+      var o = new Float32Array(pieces.length * Hs);
+      for (i = 0; i < pieces.length; i++) o.set(pieces[i][c], i * Hs);
+      out.push(o);
+    }
     return out;
   };
+
+  TT.Stretcher = Stretcher;
 })();
 
 /* ---- chat.js ---- */
@@ -2476,10 +2411,11 @@ TT.checkService = function () {
     return TT.api.clipSource(current.clip.slug).then(function (src) {
       if (my !== session) return;
       video.src = src.url;
+      current.clipUrl = src.url;
       video.playbackRate = speed;
       var pr = video.play();
       if (pr && pr.catch) pr.catch(function () { /* user presses play */ });
-      TT.audio.attach(video, onCompressorFail);
+      soundUpdate();
     });
   }
 
@@ -2497,6 +2433,7 @@ TT.checkService = function () {
     speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
     video.playbackRate = speed;
     TT.toast('Tempo: ' + fmtSpeed(speed));
+    soundUpdate();
   }
 
   // ---- INFO: playback statistics ------------------------------------------------------------
@@ -2518,40 +2455,27 @@ TT.checkService = function () {
     var dropped = q ? q.droppedVideoFrames : video.webkitDroppedFrameCount;
     if (dropped !== undefined) line('Ausgelassene Bilder', dropped);
     if (lastConv && lastConv.converted) line('Format', 'fMP4 → TS (' + lastConv.converted + ' Stücke umgepackt)');
+    if (snd) {
+      var ahead = snd.anchored && sndCtx ? Math.max(0, snd.schedEnd - sndCtx.currentTime) : 0;
+      line('Ton', 'von der App' + (snd.anchored ? ', ' + ahead.toFixed(1).replace('.', ',') + ' s vorbereitet' : ', wird vorbereitet'));
+    }
     if (ctrl) line('Werbeblocker', ctrl.adActive ? 'blockt gerade' : 'aktiv' + (ctrl.blockedCount ? ' · ' + ctrl.blockedCount + '× geblockt' : ''));
     if (speed !== 1) line('Tempo', fmtSpeed(speed));
     el.textContent = lines.join('\n');
   }
-  // ---- sound test (temporary) ---------------------------------------------------------------
-  // Checks whether this TV can play the sound itself: hls.js appends the audio as its own fMP4
-  // track; the newest fragments are kept, decoded with Web Audio and played 1.5x at the same pitch.
-  var audioCap = { init: null, codec: '', frags: [] }, test = null;
+  // ---- own sound path: tempo with sound, compressor ----------------------------------------
+  // The TV's video chip mutes the sound at any speed other than 1x, and Web Audio gets no samples
+  // from it. So for another speed or the compressor the video is muted and the app plays the
+  // sound itself: hls.js hands the audio over as its own fMP4 track; its AAC frames are collected,
+  // decoded with Web Audio in chunks of a few seconds, stretched to the speed at the same pitch
+  // and scheduled in step with the picture. Clips (plain MP4) are decoded once as a whole.
+  var aud = { init: null, lcInit: null, scale: 0, track: 1, frames: [] };
+  var snd = null, sndCtx = null, sndBus = null, sndComp = null, sndGain = null, sndFailed = false;
+  var SND_AHEAD = 2.5;
 
-  function captureAudio(h) {
-    var cap = audioCap = { init: null, codec: '', frags: [] };
-    h.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, function (e, d) {
-      var init = d.tracks && d.tracks.audio && d.tracks.audio.initSegment;
-      if (init) {
-        // hls.js sends a fresh copy on every quality switch; keep the old one if the bytes match,
-        // so fragments before and after the switch can be decoded together.
-        if (!sameBytes(init, cap.init)) cap.init = init;
-        cap.codec = d.tracks.audio.codec || '';
-      }
-    });
-    h.on(Hls.Events.BUFFER_APPENDING, function (e, d) {
-      if (d.type !== 'audio' || !cap.init || !d.frag) return;
-      // The init segment itself (ftyp box) is appended too; only moof/mdat are kept.
-      var b = d.data;
-      if (b.length > 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) return;
-      var list = cap.frags, last = list[list.length - 1];
-      if (!last || last.sn !== d.frag.sn || last.init !== cap.init) {
-        last = { sn: d.frag.sn, dur: d.frag.duration || 0, init: cap.init, chunks: [] };
-        list.push(last);
-        if (list.length > 12) list.shift();
-      }
-      last.chunks.push(new Uint8Array(d.data));
-    });
-  }
+  function readU32(b, o) { return b[o] * 16777216 + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]; }
+  function writeU32(b, o, v) { b[o] = (v >>> 24) & 255; b[o + 1] = (v >>> 16) & 255; b[o + 2] = (v >>> 8) & 255; b[o + 3] = v & 255; }
+  function boxType(b, o) { return String.fromCharCode(b[o + 4], b[o + 5], b[o + 6], b[o + 7]); }
 
   function sameBytes(a, b) {
     if (!a || !b || a.length !== b.length) return false;
@@ -2559,110 +2483,31 @@ TT.checkService = function () {
     return true;
   }
 
-  function concatBytes(parts) {
-    var n = 0, i, o = 0;
-    for (i = 0; i < parts.length; i++) n += parts[i].length;
-    var out = new Uint8Array(n);
-    for (i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].length; }
-    return out;
-  }
-
-  function testSecs(x) { return x.toFixed(1).replace('.', ',') + ' s'; }
-  function testFactor(dur, ms) { return ms > 0 ? Math.round(dur * 1000 / ms) + '× schneller als nötig' : 'sofort'; }
-  function testLine(my, text, at) {
-    if (test !== my) return -1;
-    if (at >= 0) my.lines[at] = text; else my.lines.push(text);
-    $('audiotest').textContent = my.lines.join('\n');
-    return at >= 0 ? at : my.lines.length - 1;
-  }
-
-  function closeAudioTest() {
-    if (!test) return;
-    var my = test;
-    test = null;
-    if (my.timer) clearTimeout(my.timer);
-    if (my.src) { try { my.src.stop(); } catch (e) { /* not started */ } }
-    if (my.ctx && my.ctx.close) { try { my.ctx.close(); } catch (e2) { /* ignore */ } }
-    video.muted = my.muted;
-    var box = $('audiotest');
-    if (box) box.style.display = 'none';
-  }
-
-  function runAudioTest() {
-    closeAudioTest();
-    hideOsd();
-    var box = $('audiotest');
-    if (!box) {
-      box = TT.el('pre', '');
-      box.id = 'audiotest';
-      $('stats').parentNode.appendChild(box);
-    }
-    box.style.display = 'block';
-    var my = test = { lines: [], muted: video.muted };
-    testLine(my, 'Tontest ' + TT.VERSION + '   (Zurück schließt ihn)');
-    testLine(my, '');
-    var AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) { testLine(my, '1. Web Audio fehlt'); return; }
-    try { my.ctx = new AC(); } catch (e) { testLine(my, '1. Web Audio startet nicht: ' + e); return; }
-    var ctx = my.ctx;
-    if (ctx.resume) ctx.resume();
-    var osc = ctx.createOscillator(), g = ctx.createGain();
-    osc.frequency.value = 660;
-    g.gain.value = 0.25;
-    osc.connect(g);
-    g.connect(ctx.destination);
-    osc.start(ctx.currentTime + 0.1);
-    osc.stop(ctx.currentTime + 0.8);
-    testLine(my, '1. Piepton gespielt (' + ctx.sampleRate + ' Hz, ' + (ctx.state || '?') + ')');
-
-    // The newest complete fragments (the very last one may still be appending), up to ~16 s.
-    var list = audioCap.frags.slice(0, -1), pick = [], dur = 0;
-    for (var i = list.length - 1; i >= 0 && dur < 16; i--) {
-      if (pick.length && list[i].init !== pick[0].init) break;
-      pick.unshift(list[i]);
-      dur += list[i].dur;
-    }
-    if (!pick.length) {
-      testLine(my, '2. Noch kein Ton mitgeschnitten: Video oder Stream ein paar Sekunden laufen lassen und nochmal starten');
-      return;
-    }
-    var parts = [pick[0].init];
-    pick.forEach(function (f) { parts = parts.concat(f.chunks); });
-    var orig = concatBytes(parts), lc = initAsLc(pick[0].init);
-    parts[0] = lc || pick[0].init;
-    var fixed = concatBytes(parts);
-    my.timer = setTimeout(function () {
-      testDecode(my, '2. Wie vom Player gekennzeichnet (' + audioCap.codec + ')', orig, function (A) {
-        testDecode(my, '3. Korrigiert auf AAC-LC' + (lc ? '' : ' (Aufbau unbekannt, unverändert)'), fixed, function (B) {
-          testPlayAll(my, A, B);
-        });
-      });
-    }, 1000);
-  }
-
-  function readU32(b, o) { return b[o] * 16777216 + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]; }
-  function writeU32(b, o, v) { b[o] = (v >>> 24) & 255; b[o + 1] = (v >>> 16) & 255; b[o + 2] = (v >>> 8) & 255; b[o + 3] = v & 255; }
-
-  // hls.js labels Twitch's AAC-LC as HE-AAC (object type 5, "SBR") on Chrome-like browsers. The
-  // video chip ignores that, but the TV's software decoder then applies SBR and the voice comes
-  // out distorted and low. Returns a copy of the audio init segment with a plain LC config.
-  function initAsLc(init) {
-    var names = ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd', 'mp4a', 'esds'];
-    var skip = { stsd: 8, mp4a: 28 }, path = [], off = 0, end = init.length;
+  // Offsets of the boxes along `names` (each inside the previous one), or null.
+  function boxPath(b, names) {
+    var skip = { stsd: 8, mp4a: 28 }, path = [], off = 0, end = b.length;
     for (var level = 0; level < names.length; level++) {
       var found = -1;
       while (off + 8 <= end) {
-        var size = readU32(init, off);
-        var type = String.fromCharCode(init[off + 4], init[off + 5], init[off + 6], init[off + 7]);
+        var size = readU32(b, off);
         if (size < 8 || off + size > end) return null;
-        if (type === names[level]) { found = off; break; }
+        if (boxType(b, off) === names[level]) { found = off; break; }
         off += size;
       }
       if (found < 0) return null;
       path.push(found);
-      end = found + readU32(init, found);
+      end = found + readU32(b, found);
       off = found + 8 + (skip[names[level]] || 0);
     }
+    return path;
+  }
+
+  // hls.js labels Twitch's AAC-LC as HE-AAC (object type 5, "SBR") on Chrome-like browsers. The
+  // video chip ignores that, but Web Audio's decoder then applies SBR and the voice comes out
+  // distorted and low. Returns a copy of the audio init segment with a plain LC config.
+  function initAsLc(init) {
+    var path = boxPath(init, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd', 'mp4a', 'esds']);
+    if (!path) return null;
     // esds: full box header, then 03 len ES_ID flags | 04 len (13 bytes) | 05 len config
     var e = path[path.length - 1] + 12;
     if (init[e] !== 3 || init[e + 1] > 127 || init[e + 5] !== 4 || init[e + 6] > 127 || init[e + 20] !== 5 || init[e + 21] !== 4) return null;
@@ -2682,67 +2527,363 @@ TT.checkService = function () {
     return out;
   }
 
-  function testDecode(my, label, data, next) {
-    var at = testLine(my, label + ': wird entschlüsselt …'), t0 = Date.now();
-    function done(ab, msg) {
-      if (test !== my) return;
-      testLine(my, label + ': ' + msg, at);
-      next(ab);
+  function captureAudio(h) {
+    var cap = aud = { init: null, lcInit: null, scale: 0, track: 1, frames: [] };
+    h.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, function (e, d) {
+      var init = d.tracks && d.tracks.audio && d.tracks.audio.initSegment;
+      // hls.js sends a fresh copy on every quality switch; only a real change counts.
+      if (!init || sameBytes(init, cap.init)) return;
+      var mdhd = boxPath(init, ['moov', 'trak', 'mdia', 'mdhd']), trex = boxPath(init, ['moov', 'mvex', 'trex']);
+      cap.init = init;
+      cap.lcInit = initAsLc(init);
+      cap.frames = [];
+      if (mdhd) {
+        var m = mdhd[mdhd.length - 1];
+        cap.scale = readU32(init, m + 8 + (init[m + 8] === 1 ? 20 : 12));
+      }
+      if (trex) cap.track = readU32(init, trex[trex.length - 1] + 12);
+    });
+    h.on(Hls.Events.BUFFER_APPENDING, function (e, d) {
+      if (d.type === 'audio' && cap.lcInit && cap.scale) addFrames(cap, d.data);
+    });
+  }
+
+  // Splits hls.js's moof/mdat into AAC frames with their media times (seconds, same as video.currentTime).
+  function addFrames(cap, b) {
+    var off = 0, list = [];
+    while (off + 8 <= b.length) {
+      var size = readU32(b, off);
+      if (size < 8 || off + size > b.length) break;
+      if (boxType(b, off) === 'moof') {
+        var traf = boxPath(b.subarray(off, off + size), ['moof', 'traf']);
+        if (traf) parseTraf(cap, b, off, off + traf[1], list);
+      }
+      off += size;
     }
-    try {
-      my.ctx.decodeAudioData(data.buffer, function (ab) {
-        var ms = Date.now() - t0;
-        done(ab, testSecs(ab.duration) + ' Ton in ' + ms + ' ms (' + testFactor(ab.duration, ms) + ')');
-      }, function (err) { done(null, 'fehlgeschlagen ' + ((err && err.message) || err || '')); });
-    } catch (e) {
-      done(null, 'fehlgeschlagen ' + e);
+    if (!list.length) return;
+    var fr = cap.frames, last = fr[fr.length - 1];
+    if (!last || list[0].t >= last.t + last.d - 0.001) fr.push.apply(fr, list);
+    else {
+      // Out of order (seek, quality switch): keep the list sorted, skip frames we have.
+      list.forEach(function (f) {
+        var lo = 0, hi = fr.length;
+        while (lo < hi) { var mid = (lo + hi) >> 1; if (fr[mid].t < f.t) lo = mid + 1; else hi = mid; }
+        if (lo < fr.length && Math.abs(fr[lo].t - f.t) < 0.001) return;
+        fr.splice(lo, 0, f);
+      });
+    }
+    // Keep about the last half minute behind the picture.
+    var keepFrom = (video.currentTime || 0) - 30, cut = 0;
+    while (cut < fr.length && (fr[cut].t < keepFrom || fr.length - cut > 6000)) cut++;
+    if (cut) fr.splice(0, cut);
+  }
+
+  function parseTraf(cap, b, moof, traf, list) {
+    var end = traf + readU32(b, traf), o = traf + 8, base = 0, defDur = 0, defSize = 0, trun = -1;
+    for (; o + 8 <= end; o += readU32(b, o)) {
+      var t = boxType(b, o), fl = readU32(b, o + 8) & 0xffffff;
+      if (t === 'tfhd') {
+        var q = o + 16;
+        if (fl & 1) q += 8;
+        if (fl & 2) q += 4;
+        if (fl & 8) { defDur = readU32(b, q); q += 4; }
+        if (fl & 16) defSize = readU32(b, q);
+      } else if (t === 'tfdt') {
+        base = b[o + 8] === 1 ? readU32(b, o + 12) * 4294967296 + readU32(b, o + 16) : readU32(b, o + 12);
+      } else if (t === 'trun') trun = o;
+      if (readU32(b, o) < 8) return;
+    }
+    if (trun < 0 || !cap.scale) return;
+    var flags = readU32(b, trun + 8) & 0xffffff, count = readU32(b, trun + 12), p = trun + 16;
+    var data = moof;
+    if (flags & 1) { data += readU32(b, p) | 0; p += 4; }
+    if (flags & 4) p += 4;
+    var time = base;
+    for (var i = 0; i < count; i++) {
+      var dur = defDur, sz = defSize;
+      if (flags & 0x100) { dur = readU32(b, p); p += 4; }
+      if (flags & 0x200) { sz = readU32(b, p); p += 4; }
+      if (flags & 0x400) p += 4;
+      if (flags & 0x800) p += 4;
+      if (data + sz > b.length) return;
+      list.push({ t: time / cap.scale, d: dur / cap.scale, data: b.subarray(data, data + sz) });
+      data += sz;
+      time += dur;
     }
   }
 
-  // Plays A (as labelled) and B (corrected) at normal speed, then B 1.5x at the same pitch.
-  function testPlayAll(my, A, B) {
-    var steps = [];
-    if (A) steps.push({ text: 'Probe A: wie gekennzeichnet, normales Tempo', ab: A, speed: 1, secs: 4 });
-    if (B) steps.push({ text: 'Probe B: korrigiert, normales Tempo', ab: B, speed: 1, secs: 4 });
-    if (B || A) steps.push({ text: 'Probe C: korrigiert, 1,5× mit normaler Stimme', ab: B || A, speed: 1.5, secs: 8 });
+  // Our own small fMP4 (corrected init + one moof/mdat) with the given AAC frames, for decodeAudioData.
+  function muxFrames(cap, list) {
+    var n = list.length, size = 0, i;
+    for (i = 0; i < n; i++) size += list[i].data.length;
+    var trunSize = 20 + 8 * n, trafSize = 8 + 16 + 20 + trunSize, moofSize = 8 + 16 + trafSize;
+    var out = new Uint8Array(cap.lcInit.length + moofSize + 8 + size), o = cap.lcInit.length;
+    out.set(cap.lcInit, 0);
+    function u32(v) { writeU32(out, o, v); o += 4; }
+    function str(t) { for (var k = 0; k < 4; k++) out[o++] = t.charCodeAt(k); }
+    var base = Math.round(list[0].t * cap.scale);
+    u32(moofSize); str('moof');
+    u32(16); str('mfhd'); u32(0); u32(1);
+    u32(trafSize); str('traf');
+    u32(16); str('tfhd'); u32(0x020000); u32(cap.track);
+    u32(20); str('tfdt'); u32(0x01000000); u32(Math.floor(base / 4294967296)); u32(base % 4294967296);
+    u32(trunSize); str('trun'); u32(0x000301); u32(n); u32(moofSize + 8);
+    for (i = 0; i < n; i++) { u32(Math.round(list[i].d * cap.scale)); u32(list[i].data.length); }
+    u32(8 + size); str('mdat');
+    for (i = 0; i < n; i++) { out.set(list[i].data, o); o += list[i].data.length; }
+    return out;
+  }
+
+  // Delivers the stream's sound as PCM, chunk by chunk, each continuing the previous one exactly.
+  // Every chunk is decoded with a few frames of the previous one in front (an AAC frame needs its
+  // predecessor) and lined up with the previous chunk's end by correlation.
+  function HlsSound() { this.reset(); }
+  HlsSound.prototype.reset = function () { this.tail = null; this.endT = -1; this.delay = 0; };
+  // cb(chunk) with { t0, chs, rate } starting at media time t, cb(null) if the frames aren't there yet.
+  HlsSound.prototype.read = function (ctx, t, dur, cb) {
+    var fr = aud.frames, lo = 0, hi = fr.length, self = this;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (fr[mid].t <= t + 1e-4) lo = mid + 1; else hi = mid; }
+    var i0 = lo - 1;
+    if (i0 < 0 || fr[i0].t + fr[i0].d < t || !aud.lcInit) { cb(null); return; }
+    var i1 = i0 + 1;
+    while (i1 < fr.length && fr[i1].t < t + dur && fr[i1].t - (fr[i1 - 1].t + fr[i1 - 1].d) < 0.002) i1++;
+    var atEnd = video.duration && fr[i1 - 1].t + fr[i1 - 1].d > video.duration - 0.5;
+    if (i1 - i0 < 24 && !atEnd && (i1 >= fr.length || fr[i1].t < t + dur)) { cb(null); return; }
+    var first = i0;
+    while (first > 0 && i0 - first < 3 && fr[first].t - (fr[first - 1].t + fr[first - 1].d) < 0.002) first--;
+    var list = fr.slice(first, i1), lastDur = fr[i1 - 1].d, startT = list[0].t;
+    var data = muxFrames(aud, list);
+    var cont = this.tail && Math.abs(t - this.endT) < 1e-6;
+    try {
+      ctx.decodeAudioData(data.buffer, function (ab) {
+        var R = ab.sampleRate, p = Math.round((t - startT) * R + self.delay * R);
+        if (cont) {
+          var al = alignTail(self.tail, ab.getChannelData(0), p);
+          if (al !== null) { p = al; self.delay = p / R - (t - startT); }
+        }
+        var end = ab.length - (atEnd && i1 >= fr.length ? 0 : Math.round(lastDur * R));
+        if (p < 0 || end - p < R * 0.2) { cb(null, 'kurz'); return; }
+        var chs = [];
+        for (var c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c).subarray(p, end));
+        self.endT = t + (end - p) / R;
+        self.tail = new Float32Array(chs[0].subarray(chs[0].length - 1024));
+        cb({ t0: t, chs: chs, rate: R });
+      }, function () { cb(null, 'decode'); });
+    } catch (e) {
+      cb(null, 'decode');
+    }
+  };
+
+  // Where in `pcm` the audio continuing `tail` starts (near `guess`), or null if unsure.
+  function alignTail(tail, pcm, guess) {
+    var L = tail.length, best = -2, bestQ = -1, et = 1e-9, i;
+    for (i = 0; i < L; i += 2) et += tail[i] * tail[i];
+    if (et < 1e-4) return null;
+    for (var q = Math.max(0, guess - L - 700); q <= Math.min(pcm.length - L, guess - L + 700); q++) {
+      var sum = 0, ep = 1e-9;
+      for (i = 0; i < L; i += 2) { sum += tail[i] * pcm[q + i]; ep += pcm[q + i] * pcm[q + i]; }
+      var sc = sum / Math.sqrt(et * ep);
+      if (sc > best) { best = sc; bestQ = q; }
+    }
+    return best > 0.6 ? bestQ + L : null;
+  }
+
+  // Clips are short: fetch the MP4 once more and decode its sound as a whole.
+  var clipPcm = { url: null, buf: null, loading: false, failed: false };
+  function ClipSound() {}
+  ClipSound.prototype.reset = function () {};
+  ClipSound.prototype.read = function (ctx, t, dur, cb) {
+    var url = current && current.clipUrl;
+    if (!url) { cb(null, 'clip'); return; }
+    if (clipPcm.url !== url) {
+      clipPcm = { url: url, buf: null, loading: true, failed: false };
+      var mine = clipPcm, x = new XMLHttpRequest();
+      x.open('GET', url);
+      x.responseType = 'arraybuffer';
+      x.onload = function () {
+        if (x.status !== 200) { mine.failed = true; return; }
+        try {
+          ctx.decodeAudioData(x.response, function (ab) { mine.buf = ab; mine.loading = false; },
+            function () { mine.failed = true; });
+        } catch (e) { mine.failed = true; }
+      };
+      x.onerror = function () { mine.failed = true; };
+      x.send();
+    }
+    if (clipPcm.failed) { cb(null, 'clip'); return; }
+    var ab = clipPcm.buf;
+    if (!ab) { cb(null); return; }
+    var R = ab.sampleRate, s0 = Math.max(0, Math.round(t * R)), s1 = Math.min(ab.length, Math.round((t + dur) * R));
+    if (s1 <= s0) { cb(null); return; }
+    var chs = [];
+    for (var c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c).subarray(s0, s1));
+    cb({ t0: s0 / R, chs: chs, rate: R });
+  };
+
+  var hlsSound = new HlsSound(), clipSound = new ClipSound();
+
+  function soundContext() {
+    if (sndCtx) return sndCtx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try { sndCtx = new AC(); } catch (e) { return null; }
+    sndBus = sndCtx.createGain();
+    sndComp = sndCtx.createDynamicsCompressor();
+    sndGain = sndCtx.createGain();
+    sndComp.connect(sndGain);
+    sndGain.connect(sndCtx.destination);
+    return sndCtx;
+  }
+
+  function wireCompressor() {
+    try { sndBus.disconnect(); } catch (e) { /* not connected */ }
+    var p = TT.audio.preset();
+    if (p) {
+      sndComp.threshold.value = p.threshold;
+      sndComp.ratio.value = p.ratio;
+      sndComp.knee.value = p.knee;
+      sndComp.attack.value = p.attack;
+      sndComp.release.value = p.release;
+      sndGain.gain.value = Math.pow(10, p.makeupDb / 20);
+      sndBus.connect(sndComp);
+    } else sndBus.connect(sndCtx.destination);
+  }
+
+  // Seconds the own sound plays ahead of the picture (lip sync; to be tuned on the TV).
+  function soundOffset() { return +TT.store.get('audioOffset', 0) || 0; }
+
+  function soundWanted() {
+    return !!current && !sndFailed && (speed !== 1 || TT.audio.mode() !== 'off') && (!!hls || !!current.clip);
+  }
+
+  // Called whenever speed, compressor or playback changes.
+  function soundUpdate() {
+    if (!soundWanted()) { soundStop(); return; }
+    if (!soundContext()) { soundFail(); return; }
+    wireCompressor();
+    if (!snd) snd = { seq: 0, timer: setInterval(soundTick, 150), blocks: [], errors: 0 };
+    soundRestart();
+  }
+
+  function soundStop() {
+    if (!snd) return;
+    stopBlocks();
+    clearInterval(snd.timer);
+    snd = null;
+    video.muted = false;
+  }
+
+  function soundFail() {
+    var tempo = speed !== 1;
+    sndFailed = true;
+    soundStop();
+    TT.toast(tempo ? 'Bei diesem Tempo gibt es hier leider keinen Ton' : 'Der Kompressor geht hier leider nicht');
+  }
+
+  function stopBlocks() {
+    snd.blocks.forEach(function (b) { try { b.node.stop(0); } catch (e) { /* ended */ } });
+    snd.blocks = [];
+    snd.anchored = false;
+    snd.schedEnd = 0;
+  }
+
+  function soundRestart() {
+    stopBlocks();
+    snd.seq++;
+    snd.src = current.clip ? clipSound : hlsSound;
+    snd.src.reset();
+    snd.speed = speed;
+    snd.st = null;
+    snd.feedT = null;
+    snd.outT = 0;
+    snd.busy = false;
     video.muted = true;
-    testLine(my, '');
-    var i = 0;
-    (function next() {
-      if (test !== my) return;
-      var st = steps[i++];
-      if (!st) {
-        video.muted = my.muted;
-        testLine(my, '');
-        testLine(my, 'Welche Proben (A, B, C) klangen normal, welche verzerrt?');
+  }
+
+  // Media time the own sound plays at ctx time `now`, or null between blocks.
+  function soundMediaAt(now) {
+    for (var i = 0; i < snd.blocks.length; i++) {
+      var b = snd.blocks[i];
+      if (now >= b.c0 && now < b.c1) return b.m0 + (now - b.c0) / (b.c1 - b.c0) * (b.m1 - b.m0);
+    }
+    return null;
+  }
+
+  function soundTick() {
+    if (!snd) return;
+    var ctx = sndCtx;
+    if (video.seeking) { if (!snd.seekWait) { snd.seekWait = true; stopBlocks(); } return; }
+    if (snd.seekWait) { snd.seekWait = false; soundRestart(); }
+    if (video.paused || video.readyState < 3) {
+      if (ctx.state === 'running' && ctx.suspend) ctx.suspend();
+      return;
+    }
+    if (ctx.state === 'suspended') { ctx.resume(); return; }
+    var now = ctx.currentTime;
+    if (snd.anchored) {
+      if (snd.schedEnd < now + 0.05) snd.anchored = false;   // ran dry: line up again
+      else {
+        var m = soundMediaAt(now);
+        if (m !== null && Math.abs(m - (video.currentTime + soundOffset() * snd.speed)) > 0.15 * Math.max(1, snd.speed)) {
+          soundRestart();
+          return;
+        }
+      }
+    }
+    soundFeed();
+  }
+
+  function soundFeed() {
+    if (snd.busy || (snd.anchored && snd.schedEnd - sndCtx.currentTime > SND_AHEAD)) return;
+    // Not playing yet and the picture is past where we are: start over just ahead of it.
+    if (snd.feedT === null || (!snd.anchored && snd.feedT < video.currentTime + 0.1 * snd.speed)) {
+      snd.src.reset();
+      snd.st = null;
+      snd.feedT = snd.outT = video.currentTime + 0.6 * snd.speed;
+    }
+    var my = snd.seq;
+    snd.busy = true;
+    snd.src.read(sndCtx, snd.feedT, snd.anchored ? 3 : 1.2, function (chunk, err) {
+      if (!snd || snd.seq !== my) return;
+      snd.busy = false;
+      if (err) {
+        if (++snd.errors >= 3) soundFail();
+        else snd.feedT = null;
         return;
       }
-      var at = testLine(my, '▶ ' + st.text + ' …');
-      my.timer = setTimeout(function () {
-        if (test !== my) return;
-        var ab = st.ab, chs = [], c, extra = '';
-        for (c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c));
-        if (st.speed !== 1) {
-          var t0 = Date.now();
-          chs = TT.stretch(chs, ab.sampleRate, st.speed);
-          var ms = Date.now() - t0;
-          extra = ' (beschleunigt: ' + testFactor(ab.duration, ms) + ')';
-        }
-        var n = Math.min(chs[0].length, Math.round(st.secs * ab.sampleRate));
-        var buf = my.ctx.createBuffer(chs.length, n, ab.sampleRate);
-        for (c = 0; c < chs.length; c++) buf.getChannelData(c).set(chs[c].subarray(0, n));
-        var src = my.src = my.ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(my.ctx.destination);
-        src.onended = function () {
-          if (test !== my) return;
-          testLine(my, '✓ ' + st.text + extra, at);
-          my.timer = setTimeout(next, 800);
-        };
-        testLine(my, '▶ ' + st.text + extra + '  ← läuft', at);
-        src.start(my.ctx.currentTime + 0.1);
-      }, 100);
-    })();
+      if (!chunk) return;
+      snd.errors = 0;
+      if (Math.abs(chunk.t0 - snd.feedT) > 0.05) snd.outT = chunk.t0;
+      snd.feedT = chunk.t0 + chunk.chs[0].length / chunk.rate;
+      var out = chunk.chs;
+      if (snd.speed !== 1) {
+        if (!snd.st) snd.st = new TT.Stretcher(out.length, chunk.rate, snd.speed);
+        out = snd.st.process(out);
+      }
+      if (out[0].length) soundSchedule(out, chunk.rate);
+    });
+  }
+
+  function soundSchedule(chs, rate) {
+    var ctx = sndCtx, n = chs[0].length, m0 = snd.outT, skip = 0, start;
+    snd.outT += n * snd.speed / rate;
+    if (!snd.anchored) {
+      // Start when the picture reaches m0; drop what the picture has already passed.
+      var now = ctx.currentTime, earliest = now + 0.08;
+      start = now + (m0 - video.currentTime) / snd.speed - soundOffset();
+      if (start < earliest) { skip = Math.ceil((earliest - start) * rate); start = earliest; }
+      if (skip >= n) return;
+      snd.anchored = true;
+    } else start = snd.schedEnd;
+    var len = n - skip, buf = ctx.createBuffer(chs.length, len, rate);
+    for (var c = 0; c < chs.length; c++) buf.getChannelData(c).set(skip ? chs[c].subarray(skip) : chs[c]);
+    var node = ctx.createBufferSource();
+    node.buffer = buf;
+    node.connect(sndBus);
+    node.start(start);
+    snd.blocks.push({ node: node, c0: start, c1: start + len / rate, m0: m0 + skip * snd.speed / rate, m1: snd.outT });
+    snd.schedEnd = start + len / rate;
+    while (snd.blocks.length && snd.blocks[0].c1 < ctx.currentTime - 1) snd.blocks.shift();
   }
 
   function toggleStats() {
@@ -3083,7 +3224,6 @@ TT.checkService = function () {
       list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () { TT.player.onChannelPage(login); }, more: true });
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor, more: true, stay: true });
-    if (!isClip) list.push({ icon: 'speed', label: 'Tontest', fn: runAudioTest, more: true });
     return list;
   }
 
@@ -3240,9 +3380,11 @@ TT.checkService = function () {
   }
 
   function cycleCompressor() {
-    var label = TT.audio.cycle(video, onCompressorFail);
+    var label = TT.audio.cycle();
     TT.toast(label === null ? 'Der Kompressor wird von diesem Fernseher nicht unterstützt' : 'Kompressor: ' + label);
     updateBadges();
+    if (sndCtx && snd) wireCompressor();
+    soundUpdate();
   }
 
   function switchStream(delta) {
@@ -3392,25 +3534,8 @@ TT.checkService = function () {
     play(true);
   }
 
-  // Replaces the <video> element (needed if Web Audio captured it and turned out silent).
-  function replaceVideo() {
-    var fresh = document.createElement('video');
-    fresh.id = 'video';
-    video.parentNode.replaceChild(fresh, video);
-    video = fresh;
-    bindVideo();
-    TT.audio.reset();
-    if (current) play(true);
-  }
-
-  function onCompressorFail() {
-    TT.toast('Der Kompressor wird von diesem Fernseher nicht unterstützt');
-    replaceVideo();
-    updateBadges();
-  }
-
   function destroyHls() {
-    closeAudioTest();
+    soundStop();
     if (hls) { try { hls.destroy(); } catch (e) { /* ignore */ } }
     hls = null;
   }
@@ -3470,6 +3595,7 @@ TT.checkService = function () {
       video.playbackRate = speed;
       var p = video.play();
       if (p && p.catch) p.catch(function () { /* autoplay blocked: user presses play */ });
+      soundUpdate();
     });
     hls.on(Hls.Events.FRAG_BUFFERED, function () {
       if (my !== session) return;
@@ -3526,7 +3652,6 @@ TT.checkService = function () {
     });
     hls.attachMedia(video);
     hls.loadSource(src);
-    TT.audio.attach(video, onCompressorFail);
   }
 
   function playLive(my, stream) {
@@ -3576,7 +3701,7 @@ TT.checkService = function () {
   function play(keepRetries) {
     var my = ++session;
     destroyHls();
-    if (!keepRetries) { retries = 0; stalls = []; }
+    if (!keepRetries) { retries = 0; stalls = []; sndFailed = false; }
     startedAt = Date.now();
     var p = current.clip ? playClip(my) : current.vod ? playVod(my, current.vod) : playLive(my, current.stream);
     p.catch(function (err) {
@@ -3638,7 +3763,7 @@ TT.checkService = function () {
     p.className = p.className.replace(/\bis-(vod|clip)\b/g, '').trim() + (isVod ? ' is-vod' : '') + (isClip ? ' is-clip' : '');
   }
 
-  // Video element events (again after replaceVideo()).
+  // Video element events.
   function bindVideo() {
     video.addEventListener('timeupdate', updateProgress);
     video.addEventListener('playing', function () { if (current && current.clip) setStatus(''); });
@@ -3775,7 +3900,6 @@ TT.checkService = function () {
 
     // Returns true if the key was handled. `repeat` is true while a key is held down.
     key: function (k, repeat) {
-      if (test && k === 'back') { closeAudioTest(); return true; }
       if (compose) {
         if (k === 'back') closeCompose();
         else if (k === 'left' || k === 'right' || k === 'up' || k === 'down') TT.focus.move(k);
@@ -5046,7 +5170,7 @@ TT.checkService = function () {
         function () { return TT.chat.label(); }, function () { TT.chat.cycle(); });
       row('Lautstärke-Ausgleich', 'Gleicht laute und leise Stellen aus (grüne Taste im Player)',
         function () { return TT.audio.label(); },
-        function () { if (TT.audio.cycle(null) === null) TT.toast('Der Kompressor wird von diesem Fernseher nicht unterstützt'); });
+        function () { if (TT.audio.cycle() === null) TT.toast('Der Kompressor wird von diesem Fernseher nicht unterstützt'); });
       row('Sprache der Streams', 'Welche Streams auf der Startseite und in Kategorien empfohlen werden',
         function () { return TT.store.get('lang', 'de') === 'de' ? 'Deutsch' : 'Alle Sprachen'; },
         function () { TT.store.set('lang', TT.store.get('lang', 'de') === 'de' ? 'all' : 'de'); });

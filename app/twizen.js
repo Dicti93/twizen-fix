@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.6.1';
+TT.VERSION = '0.6.2';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -2494,6 +2494,7 @@ TT.checkService = function () {
     fwd: 'M13 6v12l9-6zM3 6v12l9-6z',
     chat: 'M4 5h16v11H8l-4 4z',
     write: 'M4 17v3h3l10-10-3-3zm15-9l-3-3 2-2 3 3z',
+    more: 'M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z',
     reload: 'M17.65 6.35A8 8 0 1 0 19.73 14h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z',
     comp: 'M3 9h4l5-5v16l-5-5H3zM15 9h2v6h-2zM19 7h2v10h-2z',
     up: 'M12 4l6 7h-4v9h-4v-9H6z',
@@ -2771,6 +2772,8 @@ TT.checkService = function () {
     TT.toast('Qualität: ' + (next < 0 ? 'Automatisch' : levelName(hls.levels[next])));
   }
 
+  // The control row holds the main actions; everything else (more: true) is in the
+  // "Mehr" menu, a list opened above the row. stay: true keeps the menu open (toggles).
   function controlList() {
     var isVod = !!(current && current.vod), isClip = !!(current && current.clip);
     var list = [];
@@ -2795,23 +2798,27 @@ TT.checkService = function () {
     }
     if (!isClip) list.push({ icon: 'chat', label: 'Chat: ' + TT.chat.label(), fn: function () { TT.chat.cycle(); } });
     if (!isVod && TT.api.auth.current()) list.push({ icon: 'write', label: 'Schreiben', fn: openCompose });
-    if (!isVod) list.push({ icon: 'start', label: 'Von Anfang an', fn: watchFromStart });
-    if (isVod) list.push({ icon: 'speed', label: 'Tempo: ' + fmtSpeed(speed), fn: cycleSpeed });
-    list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor });
-    if (!isClip) list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality });
-    list.push({ icon: 'reload', label: 'Neu laden', fn: function () { TT.toast('Wird neu geladen …'); restart(); } });
-    if (following !== null) list.push({ icon: 'heart', label: following ? 'Folge ich' : 'Folgen', fn: toggleFollow });
-    if (!isVod && playlist.length > 1) {
-      list.push({ icon: 'up', label: 'Vorheriger', fn: function () { switchStream(-1); } });
-      list.push({ icon: 'down', label: 'Nächster', fn: function () { switchStream(1); } });
+    if (following !== null) {
+      list.push({ icon: 'heart', label: following ? 'Folge ich' : 'Folgen', fn: toggleFollow, more: isVod && !isClip, stay: true });
     }
+    // "Mehr"
+    if (!isClip) list.push({ icon: 'hd', label: 'Qualität: ' + qualityLabel(), fn: cycleQuality, more: true, stay: true });
+    if (isVod) list.push({ icon: 'speed', label: 'Tempo: ' + fmtSpeed(speed), fn: cycleSpeed, more: true, stay: true });
+    if (!isVod) list.push({ icon: 'start', label: 'Von Anfang an', fn: watchFromStart, more: true });
+    list.push({ icon: 'reload', label: 'Neu laden', fn: function () { TT.toast('Wird neu geladen …'); restart(); }, more: true });
     var login = isVod ? current.owner && current.owner.login : current && current.stream.broadcaster.login;
     if (login && TT.player.onChannelPage) {
-      list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () {
-        TT.player.onChannelPage(login);
-      } });
+      list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () { TT.player.onChannelPage(login); }, more: true });
     }
+    list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor, more: true, stay: true });
     return list;
+  }
+
+  var moreOpen = false, moreIndex = 0, moreItems = [];
+
+  function openMore() {
+    moreOpen = true;
+    moreIndex = 0;
   }
 
   function svgIcon(name) {
@@ -2846,16 +2853,41 @@ TT.checkService = function () {
   }
 
   function renderControls() {
-    buttons = controlList();
+    var all = controlList();
+    buttons = all.filter(function (b) { return !b.more; });
+    moreItems = all.filter(function (b) { return b.more; });
+    if (moreItems.length) buttons.push({ icon: 'more', label: 'Mehr', fn: openMore, isMore: true });
     if (btnIndex >= buttons.length) btnIndex = buttons.length - 1;
+    if (moreIndex >= moreItems.length) moreIndex = moreItems.length - 1;
     var box = $('osd-controls');
     TT.clear(box);
+    var moreBtn = null;
     buttons.forEach(function (b, i) {
-      var el = TT.el('div', 'ctl-btn' + (row === 'buttons' && i === btnIndex ? ' sel' : ''));
+      var el = TT.el('div', 'ctl-btn' + (row === 'buttons' && i === btnIndex ? ' sel' : '') + (b.isMore && moreOpen ? ' open' : ''));
       el.appendChild(svgIcon(b.icon));
       el.appendChild(TT.el('span', '', b.label));
       box.appendChild(el);
+      if (b.isMore) moreBtn = el;
     });
+    // The "Mehr" list, right above its button.
+    var menu = $('osd-more');
+    if (!menu) {
+      menu = TT.el('div', '');
+      menu.id = 'osd-more';
+      box.parentNode.parentNode.appendChild(menu);
+    }
+    TT.clear(menu);
+    menu.style.display = moreOpen && moreBtn ? '' : 'none';
+    if (moreOpen && moreBtn) {
+      moreItems.forEach(function (b, i) {
+        var el = TT.el('div', 'more-item' + (i === moreIndex ? ' sel' : ''));
+        el.appendChild(svgIcon(b.icon));
+        el.appendChild(TT.el('span', '', b.label));
+        menu.appendChild(el);
+      });
+      menu.style.left = moreBtn.offsetLeft + 'px';
+      menu.style.bottom = (menu.parentNode.clientHeight - moreBtn.offsetTop + 8) + 'px';
+    }
     renderKeys();
     if (current && current.stream && current.stream.createdAt) {
       $('osd-uptime').textContent = 'seit ' + TT.fmtUptime(current.stream.createdAt);
@@ -2867,6 +2899,7 @@ TT.checkService = function () {
 
   function hideOsd() {
     osdVisible = false;
+    moreOpen = false;
     clearTimeout(osdTimer);
     $('osd').className = 'osd';
   }
@@ -3474,6 +3507,22 @@ TT.checkService = function () {
         return true;
       }
       var isVod = !!(current && current.vod);
+      // "Mehr" menu: up/down choose, OK runs (toggles keep the menu open), Back/left/right close it.
+      if (moreOpen && osdVisible) {
+        if (k === 'up' || k === 'down') {
+          moreIndex = Math.max(0, Math.min(moreItems.length - 1, moreIndex + (k === 'down' ? 1 : -1)));
+          showOsd();
+          return true;
+        }
+        if (k === 'enter') {
+          var item = moreItems[moreIndex];
+          if (item && !item.stay) moreOpen = false;
+          if (item) item.fn();
+          if (current && !compose) showOsd();
+          return true;
+        }
+        if (k === 'back' || k === 'left' || k === 'right') { moreOpen = false; showOsd(); return true; }
+      }
       switch (k) {
         case 'back':
           // First Back hides the controls; the next one closes the player.

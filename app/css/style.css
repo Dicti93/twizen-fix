@@ -256,8 +256,18 @@ body.zap #player { left: 15rem; }
   position: absolute; left: 0; right: 0; bottom: 0; padding: 3rem 2rem 1.4rem;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
 }
-.osd-row { display: flex; align-items: center; }
-.osd-controls { display: flex; flex-wrap: wrap; flex: 1; }
+.osd-row { display: flex; align-items: center; flex-wrap: wrap; }
+.osd-controls { display: flex; flex: none; }
+.osd-keys { margin-left: auto; }
+.ctl-btn span { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
+.ctl-btn.open { background: rgba(145, 71, 255, 0.45); }
+#osd-more {
+  position: absolute; z-index: 3; min-width: 17rem; padding: 0.4rem; border-radius: 0.5rem;
+  background: rgba(24, 24, 27, 0.97); box-shadow: 0 0.3rem 1.2rem rgba(0, 0, 0, 0.6);
+}
+.more-item { display: flex; align-items: center; height: 2.6rem; padding: 0 0.9rem; border-radius: 0.35rem; font-size: 0.9rem; font-weight: 600; white-space: nowrap; }
+.more-item .ico { width: 1.2rem; height: 1.2rem; margin-right: 0.7rem; }
+.more-item.sel { background: #9147ff; color: #fff; }
 .ctl-btn {
   display: flex; align-items: center; height: 2.6rem; padding: 0 0.9rem; margin: 0.3rem 0.6rem 0.3rem 0;
   border-radius: 0.4rem; background: rgba(255, 255, 255, 0.12); font-size: 0.85rem; font-weight: 600; white-space: nowrap;

@@ -27,14 +27,19 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   Mitschreiben am Handy.
 - **Stabil bei Aussetzern:** Fällt das Internet aus, wartet die App und spielt danach von selbst weiter (Videos an
   derselben Stelle). Hakt ein Stream immer wieder oder friert das Bild ein, lädt sie neu und geht nötigenfalls eine
-  Qualitätsstufe runter. Gesperrte Inhalte
-  (nur für Abonnenten, im Land nicht verfügbar) werden verständlich gemeldet.
+  Qualitätsstufe runter. Liefert Twitch die Wiedergabeliste eines Videos nicht aus (Störung mit Fehler #2000),
+  holt die App das Video direkt aus Twitchs Speichernetz. Gesperrte Inhalte (nur für Abonnenten, im Land nicht
+  verfügbar) werden verständlich gemeldet.
 - **Videos und Clips:** Weiterschauen an der letzten Stelle, Chat-Wiedergabe, Kapitel, Vorschaubilder beim Spulen,
   Hype-Momente (Stellen mit viel Chat-Aktivität), Wiedergabetempo bis 2× mit Ton in normaler Stimmlage, Clips laufen
-  nacheinander durch.
+  nacheinander durch. Bei höherem Tempo senkt die App die Bildqualität (ab 1,25× höchstens 720p, bei 2× 720p30 oder
+  480p), damit der Fernseher mitkommt; beim Umschalten stockt das Bild kurz, danach läuft es flüssig.
 - **Eigene Tonwiedergabe:** Der Videochip älterer Fernseher schaltet bei anderem Tempo den Ton stumm und lässt keinen
   Lautstärke-Ausgleich zu. Bei Tempo ≠ 1× oder eingeschaltetem Ausgleich spielt die App den Ton deshalb selbst ab: Sie
   entschlüsselt die Tonspur per Web Audio, beschleunigt sie ohne Tonhöhenänderung (WSOLA) und hält sie synchron zum Bild.
+  Setzt der Ton aus, startet sie ihn neu, notfalls übernimmt wieder der Fernseher. Der Ausgleich hebt leise Stellen an
+  und lässt laute gleich: „Leicht“ etwas, „Nacht“ stark (für leise gestellten Fernseher). Mit „Aus“ wirkt es deshalb
+  insgesamt am leisesten.
 - **Favoriten** (ohne Konto): stehen oben in der Seitenleiste, nur für sie kommt der Hinweis „ist jetzt live“.
 - **Mit Twitch-Konto** (Anmeldung per Code oder QR-Code): im Chat schreiben (Bildschirmtastatur mit Schnellantworten
   und Kanal-Emotes), Kanälen und Kategorien folgen, gefolgte Kanäle immer aktuell, Hinweis wenn einer live geht.

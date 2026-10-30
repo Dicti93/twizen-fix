@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.8.2';
+TT.VERSION = '0.8.3';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -39,6 +39,43 @@ TT.deviceId = (function () {
   return id;
 })();
 
+// Start log for the "Startbericht" page in Settings: requests, freezes and errors of this launch.
+// It is saved every 2 s, so after a hang and a restart the previous launch can still be read.
+TT.diag = (function () {
+  var t0 = window.twzT0 || Date.now(), events = [], prev = TT.store.get('diagLast', null), last = Date.now();
+  function add(text) {
+    events.push({ t: Date.now() - t0, text: text });
+    if (events.length > 300) events.splice(0, events.length - 300);
+  }
+  function save() {
+    TT.store.set('diagLast', { version: TT.VERSION, at: Date.now(), up: Date.now() - t0, events: events.slice(-150) });
+  }
+  // A timer that runs late means the app was busy (or frozen) in between.
+  setInterval(function () {
+    var now = Date.now();
+    if (now - last > 1500) add('App blockiert für ' + ((now - last - 250) / 1000).toFixed(1).replace('.', ',') + ' s');
+    last = now;
+  }, 250);
+  setInterval(save, 2000);
+  var shown = window.twzError;
+  if (shown) window.twzError = function (msg) { add('Fehler: ' + msg); shown(msg); };
+  add('Twizen ' + TT.VERSION + ' startet');
+  // A short name for a request: the GQL field asked for, else the file name.
+  function label(url, body) {
+    if (/gql\.twitch\.tv/.test(url)) {
+      try {
+        var j = JSON.parse(body);
+        var q = String(j.query || '').replace(/^\s*(query|mutation)\s*(\([^)]*\))?\s*/, '');
+        var m = /^\{\s*(\w+)/.exec(q);
+        return 'GQL ' + (m ? m[1] : j.operationName || '?');
+      } catch (e) { return 'GQL'; }
+    }
+    var u = String(url).split('?')[0].split('/');
+    return u[2] + ' …/' + u[u.length - 1].slice(0, 30);
+  }
+  return { add: add, prev: prev, events: events, t0: t0, label: label };
+})();
+
 // Promise-based XHR. opts: { headers, body, timeout, proxy }.
 // proxy:true routes through the service; X-Fwd-* headers become real headers there.
 TT.http = function (method, url, opts) {
@@ -48,12 +85,18 @@ TT.http = function (method, url, opts) {
     var target = opts.proxy ? TT.PROXY + '/fetch?url=' + encodeURIComponent(url) : url;
     xhr.open(method, target, true);
     xhr.timeout = opts.timeout || 12000;
+    var started = Date.now();
+    function note(what) {
+      TT.diag.add(TT.diag.label(url, opts.body) + ': ' + what + ', ' + (Date.now() - started) + ' ms' +
+        (xhr.responseText ? ', ' + Math.round(xhr.responseText.length / 1024) + ' KB' : ''));
+    }
     var headers = opts.headers || {};
     for (var k in headers) {
       if (headers.hasOwnProperty(k)) xhr.setRequestHeader(opts.proxy ? 'X-Fwd-' + k : k, headers[k]);
     }
     if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
     xhr.onload = function () {
+      note(String(xhr.status));
       var res = { status: xhr.status, text: xhr.responseText };
       res.json = function () { return JSON.parse(xhr.responseText); };
       if (xhr.status >= 200 && xhr.status < 300) resolve(res);
@@ -64,8 +107,8 @@ TT.http = function (method, url, opts) {
         reject(err);
       }
     };
-    xhr.onerror = function () { reject(new Error('Network error')); };
-    xhr.ontimeout = function () { reject(new Error('Timeout')); };
+    xhr.onerror = function () { note('Netzwerkfehler'); reject(new Error('Network error')); };
+    xhr.ontimeout = function () { note('Zeitüberschreitung'); reject(new Error('Timeout')); };
     xhr.send(opts.body || null);
   });
 };
@@ -4465,6 +4508,7 @@ TT.checkService = function () {
     el.className += ' view';
     main.appendChild(el);
     stack.push({ name: name, el: el, onLeave: onLeave });
+    TT.diag.add('Seite: ' + name);
     highlightSide();
   }
 
@@ -4948,20 +4992,6 @@ TT.checkService = function () {
     return TT.focusable(TT.el('div', 'btn' + (cls ? ' ' + cls : ''), label), onSelect);
   }
 
-  // How long this launch took, and each app file's download time on this TV.
-  function startupReport() {
-    var box = TT.el('div', 'startup-report');
-    function sec(ms) { return (ms / 1000).toFixed(1).replace('.', ',') + ' s'; }
-    box.appendChild(TT.el('div', '', 'Start: ' + (TT.startupMs ? sec(TT.startupMs) : 'unbekannt') + ' bis zum Menü'));
-    var res = performance.getEntriesByType ? performance.getEntriesByType('resource') : [];
-    res.forEach(function (r) {
-      var name = r.name.split('?')[0].split('/').pop();
-      if (!/\.(js|css)$/.test(name)) return;
-      box.appendChild(TT.el('div', '', name + ': ' + sec(r.duration) + (name === 'hls.min.js' ? ' (im Hintergrund)' : '')));
-    });
-    return box;
-  }
-
   // Loads data into a section; shows errors in place. render() may return an element to focus.
   function load(el, promise, render, emptyText) {
     message(el, 'Wird geladen …');
@@ -5164,6 +5194,7 @@ TT.checkService = function () {
       var signedIn = !!TT.api.auth.current();
       var followedP = signedIn ? TT.api.followedLive().catch(function () { return []; }) : Promise.resolve([]);
       load(el, Promise.all([followedP, TT.api.topStreams()]), function (r) {
+        TT.diag.add('Startseite: Streams sind da');
         var followed = r[0].slice().sort(function (a, b) { return b.viewersCount - a.viewersCount; });
         var top = r[1];
         var featured = followed[0] || top[0];
@@ -5220,6 +5251,7 @@ TT.checkService = function () {
         var trendSlot = TT.el('div');
         el.appendChild(trendSlot);
         loadTrending().then(function (tags) {
+          TT.diag.add('Startseite: „Gerade angesagt“ fertig');
           if (tags.length) trendSlot.appendChild(carousel('Gerade', ' angesagt', tags.map(tagCard)));
           TT.lazy();
         }).catch(function () { /* optional row */ });
@@ -5757,8 +5789,39 @@ TT.checkService = function () {
       row('Emotes im Chat', '7TV, BTTV und FFZ. Ausschalten, falls der Chat die Wiedergabe ruckeln lässt',
         function () { return TT.chat.sevenTvEnabled() ? 'An' : 'Aus'; },
         function () { TT.chat.setSevenTv(!TT.chat.sevenTvEnabled()); });
+      row('Startbericht', 'Was beim Start wie lange gedauert hat, auch vom letzten Start – zum Fehlersuchen',
+        function () { return 'Anzeigen'; }, function () { views.diag(); });
       el.appendChild(TT.el('div', 'about', 'Twizen ' + TT.VERSION + ' · Werbeblocker aktiv · fMP4→TS für ältere Fernseher'));
-      el.appendChild(startupReport());
+    },
+
+    // The start log (TT.diag): one focusable line each, so the remote can scroll through it.
+    diag: function () {
+      var el = section('Startbericht', 'Zeiten ab dem Öffnen von Twizen');
+      push('diag', el);
+      function sec(ms) { return (ms / 1000).toFixed(1).replace('.', ',') + ' s'; }
+      var first = null;
+      function line(text, cls) {
+        var d = TT.focusable(TT.el('div', 'diag-line' + (cls ? ' ' + cls : ''), text), null);
+        el.appendChild(d);
+        if (!first) first = d;
+      }
+      line('Dieser Start: Menü nach ' + (TT.startupMs ? sec(TT.startupMs) : 'unbekannt'), 'diag-h');
+      // Before Twizen's own clock starts: TizenBrew fetching index.html through its service.
+      var nav = window.performance && performance.timing;
+      if (nav && nav.navigationStart && window.twzT0) line('Davor: index.html über TizenBrew geladen in ' + sec(twzT0 - nav.navigationStart));
+      var res = performance.getEntriesByType ? performance.getEntriesByType('resource') : [];
+      res.forEach(function (r) {
+        var name = r.name.split('?')[0].split('/').pop();
+        if (/\.(js|css)$/.test(name)) line(sec(r.startTime) + '  Datei ' + name + ': ' + sec(r.duration));
+      });
+      TT.diag.events.forEach(function (e) { line(sec(e.t) + '  ' + e.text); });
+      var p = TT.diag.prev;
+      if (p && p.events) {
+        line('Letzter Start (' + p.version + ', vor ' + Math.round((Date.now() - p.at) / 60000) + ' min): lief ' +
+          sec(p.up) + ', danach nichts mehr gespeichert', 'diag-h');
+        p.events.forEach(function (e) { line(sec(e.t) + '  ' + e.text); });
+      }
+      if (first) TT.focus.set(first);
     },
 
     search: function () {
@@ -6014,6 +6077,7 @@ TT.checkService = function () {
     var boot = document.getElementById('boot');
     if (boot) boot.parentNode.removeChild(boot);
     TT.startupMs = window.twzT0 ? Date.now() - twzT0 : 0;
+    TT.diag.add('Menü ist da');
     // Fetch the video library in the background so it's ready by the time a stream is picked.
     setTimeout(function () {
       TT.loadHls().then(function (H) {

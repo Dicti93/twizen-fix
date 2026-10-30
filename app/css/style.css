@@ -221,7 +221,9 @@ body.zap #player { left: 15rem; }
   padding: 0.4rem 1.2rem; border-radius: 0.4rem; margin: 0.3rem 0;
 }
 .about { font-size: 0.85rem; color: #6b6b75; margin-top: 1.4rem; }
-.startup-report { font-size: 0.75rem; color: #6b6b75; margin-top: 0.4rem; line-height: 1.5; }
+.diag-line { font-size: 0.8rem; color: #b8b8c0; padding: 0.15rem 0.5rem; border-radius: 4px; font-family: monospace; }
+.diag-line.focused { background: #2f2f35; color: #fff; }
+.diag-h { color: #bf94ff; margin-top: 0.8rem; font-family: inherit; font-size: 0.9rem; }
 
 /* ---- player ---- */
 #player { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #000; display: flex; z-index: 10; }

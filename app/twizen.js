@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.4';
+TT.VERSION = '0.7.5';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -2452,10 +2452,8 @@ TT.checkService = function () {
   // ---- playback speed (videos and clips) -------------------------------------------------
   var speed = 1, SPEEDS = [1, 1.25, 1.5, 2];
   function fmtSpeed(x) { return String(x).replace('.', ',') + '×'; }
-  function cycleSpeed() { setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length]); }
-
-  function setSpeed(x) {
-    speed = x;
+  function cycleSpeed() {
+    speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
     video.playbackRate = speed;
     TT.toast('Tempo: ' + fmtSpeed(speed));
     if (current && current.clip) switchClipQuality();
@@ -2807,8 +2805,7 @@ TT.checkService = function () {
   function soundOffset() { return +TT.store.get('audioOffset', 0) || 0; }
 
   function soundWanted() {
-    return !!current && !sndFailed && !(ttest && ttest.noSound) &&
-      (speed !== 1 || TT.audio.mode() !== 'off') && (!!hls || !!current.clip);
+    return !!current && !sndFailed && (speed !== 1 || TT.audio.mode() !== 'off') && (!!hls || !!current.clip);
   }
 
   // Called whenever speed, compressor or playback changes.
@@ -2935,37 +2932,27 @@ TT.checkService = function () {
       snd.st = null;
       snd.feedT = snd.outT = video.currentTime + 0.6 * snd.speed;
     }
-    var my = snd.seq, t0 = Date.now(), inRead = true;
+    var my = snd.seq;
     snd.busy = true;
     snd.src.read(sndCtx, snd.feedT, snd.anchored ? 3 : 1.2, function (chunk, err) {
-      if (inRead) { soundChunk(my, chunk, err); return; }
-      var t1 = Date.now();
-      sndWork.wait += t1 - t0;
-      soundChunk(my, chunk, err);
-      sndWork.ms += Date.now() - t1;
+      if (!snd || snd.seq !== my) return;
+      snd.busy = false;
+      if (err) {
+        if (++snd.errors >= 3) soundFail();
+        else snd.feedT = null;
+        return;
+      }
+      if (!chunk) return;
+      snd.errors = 0;
+      if (Math.abs(chunk.t0 - snd.feedT) > 0.05) snd.outT = chunk.t0;
+      snd.feedT = chunk.t0 + chunk.chs[0].length / chunk.rate;
+      var out = chunk.chs;
+      if (snd.speed !== 1) {
+        if (!snd.st) snd.st = new TT.Stretcher(out.length, chunk.rate, snd.speed);
+        out = snd.st.process(out);
+      }
+      if (out[0].length) soundSchedule(out, chunk.rate);
     });
-    inRead = false;
-    sndWork.ms += Date.now() - t0;
-  }
-
-  function soundChunk(my, chunk, err) {
-    if (!snd || snd.seq !== my) return;
-    snd.busy = false;
-    if (err) {
-      if (++snd.errors >= 3) soundFail();
-      else snd.feedT = null;
-      return;
-    }
-    if (!chunk) return;
-    snd.errors = 0;
-    if (Math.abs(chunk.t0 - snd.feedT) > 0.05) snd.outT = chunk.t0;
-    snd.feedT = chunk.t0 + chunk.chs[0].length / chunk.rate;
-    var out = chunk.chs;
-    if (snd.speed !== 1) {
-      if (!snd.st) snd.st = new TT.Stretcher(out.length, chunk.rate, snd.speed);
-      out = snd.st.process(out);
-    }
-    if (out[0].length) soundSchedule(out, chunk.rate);
   }
 
   function soundSchedule(chs, rate) {
@@ -2990,166 +2977,6 @@ TT.checkService = function () {
     snd.blocks.push({ node: node, c0: start, c1: start + len / rate, m0: m0 + skip * snd.speed / rate, m1: snd.outT });
     snd.schedEnd = start + len / rate;
     while (snd.blocks.length && snd.blocks[0].c1 < ctx.currentTime - 1) snd.blocks.shift();
-  }
-
-  // ---- tempo test (temporary) ----------------------------------------------------------------
-  // Why does the picture stutter for a while after switching to a higher speed? The test makes
-  // the same switch with and without the own sound path, each time from the quality the video
-  // played at the start, and measures the picture second by second.
-  var ttest = null, sndWork = { ms: 0, wait: 0 };
-  var TEST_RUNS = [[1.5, true], [1.5, false], [2, true], [2, false]], TEST_SECS = 15;
-
-  function testSecs(ms) { return (ms / 1000).toFixed(1).replace('.', ',') + ' s'; }
-  function droppedFrames() {
-    var q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
-    var d = q ? q.droppedVideoFrames : video.webkitDroppedFrameCount;
-    return typeof d === 'number' ? d : null;
-  }
-
-  function testShow(my) {
-    if (ttest === my) $('tempotest').textContent = my.lines.concat(my.status ? ['', my.status] : []).join('\n');
-  }
-
-  function runTempoTest() {
-    closeTempoTest();
-    hideOsd();
-    if (!hls || !current || !current.vod || current.clip || !hls.levels || hls.currentLevel < 0) {
-      TT.toast('Erst ein Video ein paar Sekunden laufen lassen');
-      return;
-    }
-    var box = $('tempotest');
-    if (!box) {
-      box = TT.el('pre', '');
-      box.id = 'tempotest';
-      $('stats').parentNode.appendChild(box);
-    }
-    box.style.display = 'block';
-    var my = ttest = { lines: [], run: -1, level: hls.currentLevel, auto: hls.autoLevelEnabled, results: [] };
-    my.lines.push('Tempotest ' + TT.VERSION + ' · ' + levelName(hls.levels[my.level]) +
-      ', Kompressor ' + TT.audio.label() + '   (Zurück bricht ab, dauert etwa 2 Minuten)');
-    my.lines.push('Jede Sekunde nach dem Umschalten:  . flüssig   + ruckelt   # Bild steht');
-    // The fMP4 -> TS repackaging also runs in the app; count its time too.
-    my.conv = lastConv;
-    if (my.conv) {
-      var convert = my.conv.convert;
-      my.conv.convert = function () {
-        var t0 = Date.now();
-        try { return convert.apply(this, arguments); } finally { if (my.m) my.m.conv += Date.now() - t0; }
-      };
-    }
-    my.timer = setInterval(function () { testTick(my); }, 100);
-    testPrepare(my);
-  }
-
-  // Back to 1x at the starting quality, then wait until the picture runs steadily for 8 s.
-  function testPrepare(my) {
-    my.run++;
-    my.m = null;
-    my.noSound = false;
-    if (my.run >= TEST_RUNS.length) { testDone(my); return; }
-    if (speed !== 1) setSpeed(1);
-    else soundUpdate();
-    if (hls.currentLevel !== my.level) hls.nextLevel = my.level;
-    my.prep = { at: Date.now(), steadyAt: 0, lastT: video.currentTime };
-  }
-
-  function testTick(my) {
-    if (ttest !== my) return;
-    if (!hls) { closeTempoTest(true); return; }
-    var ms = Date.now(), run = TEST_RUNS[my.run];
-    if (my.prep) {
-      var pr = my.prep, moving = video.currentTime !== pr.lastT && !video.paused;
-      pr.lastT = video.currentTime;
-      if (!moving || hls.currentLevel !== my.level) pr.steadyAt = 0;
-      else if (!pr.steadyAt) pr.steadyAt = ms;
-      my.status = 'Lauf ' + (my.run + 1) + '/' + TEST_RUNS.length + ': zurück auf 1× und ' + levelName(hls.levels[my.level]) +
-        ' … ' + Math.round((ms - pr.at) / 1000) + ' s';
-      if (video.paused) my.status += ' (Video läuft nicht – bitte Play drücken)';
-      testShow(my);
-      if ((pr.steadyAt && ms - pr.steadyAt >= 8000) || ms - pr.at > 45000) {
-        my.prep = null;
-        if (my.auto) hls.loadLevel = -1;
-        testStart(my, run, pr.steadyAt ? '' : ' (Qualität kam nicht zurück)');
-      }
-      return;
-    }
-    var m = my.m, gap = ms - m.tickAt, vt = video.currentTime;
-    m.tickAt = ms;
-    if (gap > 150) { m.blocked += gap - 100; m.longest = Math.max(m.longest, gap); }
-    var sec = Math.min(TEST_SECS - 1, Math.floor((ms - m.at) / 1000)), d = droppedFrames();
-    if (vt > m.lastT) m.moved[sec] += vt - m.lastT;
-    else if (!video.paused) m.frozen += gap;
-    if (d !== null && m.lastD !== null) m.dropped[sec] += Math.max(0, d - m.lastD);
-    m.lastT = vt;
-    m.lastD = d;
-    if (hls.currentLevel !== m.lastLevel) { m.switches.push(levelName(hls.levels[hls.currentLevel]) + ' nach ' + testSecs(ms - m.at)); m.lastLevel = hls.currentLevel; }
-    if (run[1] && m.soundAt < 0 && snd && snd.anchored && video.muted) m.soundAt = ms - m.at;
-    my.status = 'Lauf ' + (my.run + 1) + '/' + TEST_RUNS.length + ': ' + fmtSpeed(run[0]) + (run[1] ? ' mit' : ' ohne') +
-      ' App-Ton … ' + Math.round((ms - m.at) / 1000) + ' / ' + TEST_SECS + ' s';
-    testShow(my);
-    if (ms - m.at >= TEST_SECS * 1000) testReport(my, run);
-  }
-
-  function testStart(my, run, note) {
-    var m = my.m = { at: Date.now(), tickAt: Date.now(), lastT: video.currentTime, lastD: droppedFrames(), lastLevel: hls.currentLevel,
-      blocked: 0, longest: 0, frozen: 0, conv: 0, moved: [], dropped: [], switches: [], soundAt: -1,
-      work: sndWork.ms, wait: sndWork.wait, note: note, from: levelName(hls.levels[hls.currentLevel]) };
-    for (var i = 0; i < TEST_SECS; i++) { m.moved.push(0); m.dropped.push(0); }
-    my.noSound = !run[1];
-    setSpeed(run[0]);
-  }
-
-  function testReport(my, run) {
-    var m = my.m, strip = '', calm = 0, total = 0, noDrops = m.lastD === null;
-    for (var i = 0; i < TEST_SECS; i++) {
-      var r = m.moved[i] / run[0], c = r < 0.5 ? '#' : r < 0.9 || m.dropped[i] >= 3 ? '+' : '.';
-      strip += c;
-      total += m.dropped[i];
-      if (c !== '.') calm = i + 1;
-    }
-    my.results.push({ run: run, calm: calm });
-    var lines = my.lines;
-    lines.push('');
-    lines.push(fmtSpeed(run[0]) + (run[1] ? ' mit App-Ton:   ' : ' ohne App-Ton:  ') + strip + '   ' +
-      (calm >= TEST_SECS ? 'nicht ruhig geworden' : calm ? 'ruhig nach ' + calm + ' s' : 'sofort ruhig') + m.note);
-    lines.push('   Bild stand ' + testSecs(m.frozen) + (noDrops ? '' : ', ' + total + ' Bilder ausgelassen') +
-      ', Qualität ' + m.from + (m.switches.length ? ' → ' + m.switches.join(' → ') : ''));
-    lines.push('   App blockiert ' + testSecs(m.blocked) + ' (längster Hänger ' + m.longest + ' ms), Umpacken ' + testSecs(m.conv) +
-      (run[1] ? ', Ton rechnen ' + testSecs(sndWork.ms - m.work) + ', entschlüsseln ' + testSecs(sndWork.wait - m.wait) +
-        ', Ton da nach ' + (m.soundAt < 0 ? '–' : testSecs(m.soundAt)) : ''));
-    testPrepare(my);
-  }
-
-  function testDone(my) {
-    if (speed !== 1) setSpeed(1);
-    else soundUpdate();
-    hls.loadLevel = my.auto ? -1 : my.level;
-    var avg = function (sound) {
-      var r = my.results.filter(function (x) { return x.run[1] === sound; }), sum = 0;
-      r.forEach(function (x) { sum += x.calm; });
-      return r.length ? (sum / r.length).toFixed(1).replace('.', ',') + ' s' : '–';
-    };
-    my.status = 'Fertig, Tempo wieder 1×. Bis ruhig im Schnitt: mit App-Ton ' + avg(true) + ', ohne ' + avg(false) +
-      '.\nBitte abfotografieren und schicken. Zurück schließt den Test.';
-    clearInterval(my.timer);
-    my.timer = null;
-    testShow(my);
-  }
-
-  // `gone`: the player is closing, leave speed and quality alone.
-  function closeTempoTest(gone) {
-    if (!ttest) return;
-    var my = ttest;
-    ttest = null;
-    clearInterval(my.timer);
-    if (my.conv) delete my.conv.convert;
-    if (!gone && my.timer && hls) {
-      hls.loadLevel = my.auto ? -1 : my.level;
-      if (speed !== 1) setSpeed(1);
-      else soundUpdate();
-    }
-    var box = $('tempotest');
-    if (box) box.style.display = 'none';
   }
 
   function toggleStats() {
@@ -3508,7 +3335,6 @@ TT.checkService = function () {
       list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () { TT.player.onChannelPage(login); }, more: true });
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor, more: true, stay: true });
-    if (isVod && !isClip) list.push({ icon: 'speed', label: 'Tempotest', fn: runTempoTest, more: true });
     return list;
   }
 
@@ -3820,7 +3646,6 @@ TT.checkService = function () {
   }
 
   function destroyHls() {
-    closeTempoTest(true);
     soundStop();
     if (hls) { try { hls.destroy(); } catch (e) { /* ignore */ } }
     hls = null;
@@ -4249,7 +4074,6 @@ TT.checkService = function () {
 
     // Returns true if the key was handled. `repeat` is true while a key is held down.
     key: function (k, repeat) {
-      if (ttest && k === 'back') { closeTempoTest(); return true; }
       if (compose) {
         if (k === 'back') closeCompose();
         else if (k === 'left' || k === 'right' || k === 'up' || k === 'down') TT.focus.move(k);

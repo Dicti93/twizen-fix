@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.6';
+TT.VERSION = '0.8.0';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -227,6 +227,7 @@ TT.checkService = function () {
   var STREAM_FIELDS =
     'id title viewersCount createdAt contentClassificationLabels{ id } previewImageURL(width:356,height:200) ' +
     'broadcaster{ login displayName profileImageURL(width:70) } game{ name displayName }';
+  var GAME_FIELDS = 'name displayName boxArtURL(width:192,height:256) viewersCount tags(tagType:CONTENT){ id localizedName }';
 
   // ---- auth -------------------------------------------------------------
   var auth = {
@@ -292,7 +293,8 @@ TT.checkService = function () {
   function gql(query, variables, opts, retried) {
     opts = opts || {};
     var a = opts.anonymous ? null : auth.current();
-    var headers = { 'Client-Id': a ? a.clientId : TT.WEB_CLIENT_ID };
+    // German names for categories and tags ("Musik", "Egoshooter").
+    var headers = { 'Client-Id': a ? a.clientId : TT.WEB_CLIENT_ID, 'Accept-Language': 'de-DE' };
     if (a) headers.Authorization = 'OAuth ' + a.token;
     return TT.http('POST', GQL_URL, {
       headers: headers,
@@ -594,9 +596,102 @@ TT.checkService = function () {
     },
 
     topCategories: function () {
-      return gql('query{ games(first:100){ edges{ node{ name displayName ' +
-        'boxArtURL(width:192,height:256) viewersCount } } } }')
+      return gql('query{ games(first:100){ edges{ node{ ' + GAME_FIELDS + ' } } } }')
         .then(function (d) { return edgesToNodes(d.games); });
+    },
+
+    // Categories by viewers, only those with all `tags` (ids) if given. A pager like livePager:
+    // anonymous GQL gives the first 100 only; signed in, further pages are tried.
+    categoryPager: function (tags) {
+      var cursor = null, done = false;
+      return {
+        next: function () {
+          if (done) return Promise.resolve({ items: [], done: true });
+          var first = !cursor;
+          return gql('query($c:Cursor, $t:[String!]){ games(first:100, after:$c, options:{sort:VIEWER_COUNT, tags:$t}){ ' +
+            'edges{ cursor node{ ' + GAME_FIELDS + ' } } } }', { c: cursor, t: tags && tags.length ? tags : null })
+            .then(function (d) {
+              var edges = (d.games && d.games.edges) || [];
+              cursor = edges.length >= 100 && auth.current() ? edges[edges.length - 1].cursor : null;
+              done = !cursor;
+              return { items: edgesToNodes(d.games), done: done };
+            }, function (e) {
+              if (first) throw e;
+              done = true;   // Twitch refuses further pages
+              return { items: [], done: true };
+            });
+        }
+      };
+    },
+
+    // Categories with live channels in the Settings language, from four differently sorted
+    // lists of channels (Twitch gives 30 per list without login). [{ game, channels, viewers }]
+    langCategories: function () {
+      var lang = TT.store.get('lang', 'de');
+      var opt = lang === 'all' ? '' : ', languages:[' + lang.toUpperCase() + ']';
+      return Promise.all(['RELEVANCE', 'VIEWER_COUNT', 'RECENT', 'VIEWER_COUNT_ASC'].map(function (sort) {
+        return gql('query{ streams(first:30, options:{sort:' + sort + opt + '}){ edges{ node{ id viewersCount game{ ' + GAME_FIELDS + ' } } } } }')
+          .then(function (d) { return edgesToNodes(d.streams); }, function () { return []; });
+      })).then(function (lists) {
+        var seen = {}, byName = {}, out = [];
+        lists.forEach(function (list) {
+          list.forEach(function (st) {
+            if (seen[st.id] || !st.game) return;
+            seen[st.id] = 1;
+            var c = byName[st.game.name];
+            if (!c) { c = byName[st.game.name] = { game: st.game, channels: 0, viewers: 0 }; out.push(c); }
+            c.channels++;
+            c.viewers += st.viewersCount || 0;
+          });
+        });
+        return out.sort(function (a, b) { return b.viewers - a.viewers; });
+      });
+    },
+
+    searchCategoryTags: function (q) {
+      return gql('query($q:String!){ searchCategoryTags(userQuery:$q, limit:20){ id localizedName } }', { q: q })
+        .then(function (d) { return d.searchCategoryTags || []; });
+    },
+
+    gameTags: function (name) {
+      return gql('query($n:String!){ game(name:$n){ tags(tagType:CONTENT){ id localizedName } } }', { n: name })
+        .then(function (d) { return (d.game && d.game.tags) || []; });
+    },
+
+    // Live channels with their channel tags, for "Gerade angesagt": the top channels plus those
+    // of the six biggest categories (100 each), in the Settings language.
+    liveTagSample: function () {
+      var lang = TT.store.get('lang', 'de');
+      var fields = STREAM_FIELDS + ' freeformTags{ name }';
+      var top = Promise.all(['RELEVANCE', 'VIEWER_COUNT'].map(function (sort) {
+        return gql('query{ streams(first:30, options:{sort:' + sort + (lang === 'all' ? '' : ', languages:[' + lang.toUpperCase() + ']') +
+          '}){ edges{ node{ ' + fields + ' } } } }').then(function (d) { return edgesToNodes(d.streams); }, function () { return []; });
+      }));
+      var cats = gql('query{ games(first:6, options:{sort:VIEWER_COUNT}){ edges{ node{ name } } } }').then(function (d) {
+        return Promise.all(edgesToNodes(d.games).map(function (g) {
+          return gql('query($n:String!){ game(name:$n){ streams(first:100' + (lang === 'all' ? '' : ', options:{languages:["' + lang.toUpperCase() + '"]}') +
+            '){ edges{ node{ ' + fields + ' } } } } }', { n: g.name })
+            .then(function (r) { return r.game ? edgesToNodes(r.game.streams) : []; }, function () { return []; });
+        }));
+      }, function () { return []; });
+      return Promise.all([top, cats]).then(function (r) {
+        var seen = {}, out = [];
+        r[0].concat(r[1]).forEach(function (list) {
+          list.forEach(function (st) { if (!seen[st.id]) { seen[st.id] = 1; out.push(st); } });
+        });
+        return out;
+      });
+    },
+
+    // Live channels with a channel tag, in the Settings language (all languages if there are none).
+    tagStreams: function (tag) {
+      var lang = TT.store.get('lang', 'de');
+      function query(langs) {
+        return gql('query($t:[String!]){ streams(first:30, options:{freeformTags:$t' + (langs ? ', languages:[' + langs + ']' : '') +
+          '}){ edges{ node{ ' + STREAM_FIELDS + ' } } } }', { t: [tag] }).then(function (d) { return edgesToNodes(d.streams); });
+      }
+      if (lang === 'all') return query(null);
+      return query(lang.toUpperCase()).then(function (list) { return list.length ? list : query(null); });
     },
 
     // German streams first if that's the setting; falls back to all languages when there are none.
@@ -4575,7 +4670,8 @@ TT.checkService = function () {
     return card;
   }
 
-  function categoryCard(g, onPick) {
+  // `sub` replaces the viewer count line.
+  function categoryCard(g, onPick, sub) {
     var card = TT.el('div', 'card cat-card');
     var lift = TT.el('div', 'lift');
     var box = TT.el('div', 'box');
@@ -4585,8 +4681,135 @@ TT.checkService = function () {
     lift.appendChild(box);
     card.appendChild(lift);
     card.appendChild(TT.el('div', 'card-title', g.displayName || g.name));
-    if (g.viewersCount) card.appendChild(TT.el('div', 'card-sub', TT.fmtViewers(g.viewersCount)));
+    if (sub || g.viewersCount) card.appendChild(TT.el('div', 'card-sub', sub || TT.fmtViewers(g.viewersCount)));
+    if (g.tags && g.tags.length) {
+      card.appendChild(TT.el('div', 'card-tags', g.tags.slice(0, 2).map(function (t) { return t.localizedName; }).join(' · ')));
+    }
     return TT.focusable(card, function () { if (onPick) onPick(); else views.category(g); });
+  }
+
+  // "Gerade angesagt": a channel tag that many live channels use right now (see trendingTags).
+  function tagCard(t) {
+    var card = TT.el('div', 'card stream-card tag-card');
+    var lift = TT.el('div', 'lift');
+    var thumb = TT.el('div', 'thumb');
+    var img = hideBroken(TT.el('img'));
+    var s = t.top;
+    lazySrc(img, s && s.previewImageURL ? s.previewImageURL + '?t=' + Math.floor(Date.now() / 300000) : '');
+    thumb.appendChild(img);
+    thumb.appendChild(TT.el('span', 'pill viewers', t.channels + ' Kanäle'));
+    lift.appendChild(thumb);
+    card.appendChild(lift);
+    var txt = TT.el('div', 'card-text pad');
+    txt.appendChild(TT.el('div', 'card-title', '#' + t.name));
+    txt.appendChild(TT.el('div', 'card-sub', TT.fmtViewers(t.viewers) + (t.games.length ? ' · ' + t.games.slice(0, 2).join(', ') : '')));
+    card.appendChild(txt);
+    return TT.focusable(card, function () { views.tag(t.name); });
+  }
+
+  // Channel tags that say nothing about what's going on (language, drops, mood, platform ...).
+  var TAG_STOP = ('deutsch german germany deutschland english englisch dropsaktiviert dropsenabled drops gaming gamer ' +
+    'irl safespace cozy chill chilling fun spass community ranked competitive lurkerfriendly fsk18 fsk16 18plus weiblich ' +
+    'female girl frau male mann adhd adhs vod wiederholen rerun justchatting vtuber gervtuber envtuber nobackseating ' +
+    'nobackseat nospoilers chatting talk live stream streamer twitch werbung familyfriendly lgbtq lgbtqia pc ps5 xbox ' +
+    'switch casual anfänger entspannt gemütlich lustig interaktiv sober austria österreich schweiz swiss pvp pve adc ' +
+    'jungle support midlane toplane cozygaming cozygamer reaction react cs2 valo lol wow gta gtarp roleplay').split(' ');
+
+  function tagKey(t) { return String(t).toLowerCase().replace(/[^a-z0-9äöüß]/g, ''); }
+
+  // Tags that are unusually frequent among live channels right now. Each day's shares are kept
+  // for a week; a tag counts by how much more common it is today than on average before, so
+  // evergreens fade out after a few days and events (like Stream-o-Ween or a Minecraft project)
+  // stand out.
+  function trendingTags(streams) {
+    var games = {}, tags = {}, total = streams.length || 1;
+    streams.forEach(function (st) { if (st.game) games[tagKey(st.game.name)] = 1; });
+    streams.forEach(function (st) {
+      var mine = {};
+      (st.freeformTags || []).forEach(function (ft) {
+        var k = tagKey(ft.name);
+        if (!k || mine[k] || games[k] || TAG_STOP.indexOf(k) >= 0) return;
+        mine[k] = 1;
+        var t = tags[k] || (tags[k] = { name: ft.name, channels: 0, viewers: 0, top: null, games: [] });
+        t.channels++;
+        t.viewers += st.viewersCount || 0;
+        if (!t.top || st.viewersCount > t.top.viewersCount) t.top = st;
+        var g = st.game && st.game.displayName;
+        if (g && t.games.indexOf(g) < 0) t.games.push(g);
+      });
+    });
+    var today = new Date().toISOString().slice(0, 10), hist = TT.store.get('tagHistory', []) || [];
+    var past = hist.filter(function (h) { return h.day !== today; }).slice(-7);
+    var shares = {}, list = [];
+    for (var k in tags) {
+      if (!tags.hasOwnProperty(k)) continue;
+      var t = tags[k], share = t.channels / total, before = 0;
+      shares[k] = Math.round(share * 10000) / 10000;
+      past.forEach(function (h) { before += h.shares[k] || 0; });
+      t.score = share - (past.length ? before / past.length : 0);
+      if (t.channels >= 3 && t.score > 0) list.push(t);
+    }
+    // Keep the 80 most common tags of today for the history.
+    var keep = {};
+    Object.keys(shares).sort(function (a, b) { return shares[b] - shares[a]; }).slice(0, 80)
+      .forEach(function (k2) { keep[k2] = shares[k2]; });
+    TT.store.set('tagHistory', past.concat([{ day: today, shares: keep }]));
+    return list.sort(function (a, b) { return b.score - a.score; }).slice(0, 10);
+  }
+
+  // The live sample is loaded at most every 10 minutes (it takes nine requests).
+  var trendCache = null;
+  function loadTrending() {
+    if (trendCache && Date.now() - trendCache.at < 600000) return Promise.resolve(trendCache.list);
+    return TT.api.liveTagSample().then(function (streams) {
+      var list = trendingTags(streams);
+      trendCache = { at: Date.now(), list: list };
+      return list;
+    });
+  }
+
+  // Search box with the on-screen keyboard (also takes a physical keyboard via el.typeKey).
+  // onChange(query) runs on every change.
+  function typeBox(el, placeholder, onChange) {
+    var query = '';
+    var input = TT.el('div', 'search-box');
+    input.appendChild(icon(NAV[5][2]));
+    var text = TT.el('span', 'search-text');
+    input.appendChild(text);
+    input.appendChild(TT.el('span', 'caret'));
+    el.appendChild(input);
+    var kb = TT.el('div', 'keyboard');
+    el.appendChild(kb);
+    function update() {
+      text.textContent = query || placeholder;
+      text.className = 'search-text' + (query ? '' : ' placeholder');
+      onChange(query);
+    }
+    ['abcdefghij', 'klmnopqrst', 'uvwxyz0123', '456789_'].forEach(function (keys) {
+      var r = TT.el('div', 'keyrow');
+      keys.split('').forEach(function (ch) {
+        r.appendChild(TT.focusable(TT.el('div', 'key', ch.toUpperCase()), function () { query += ch; update(); }));
+      });
+      kb.appendChild(r);
+    });
+    var actions = TT.el('div', 'keyrow');
+    actions.appendChild(TT.focusable(TT.el('div', 'key wide', 'Leerzeichen'), function () { query += ' '; update(); }));
+    actions.appendChild(TT.focusable(TT.el('div', 'key wide', '⌫  Löschen'), function () {
+      query = query.slice(0, -1); update();
+    }));
+    actions.appendChild(TT.focusable(TT.el('div', 'key wide', 'Alles löschen'), function () {
+      query = ''; update();
+    }));
+    kb.appendChild(actions);
+    // Physical keyboard typing (desktop testing / USB keyboards).
+    el.typeKey = function (e) {
+      if (e.key && e.key.length === 1 && /[\w ]/.test(e.key)) { query += e.key.toLowerCase(); update(); return true; }
+      if (e.keyCode === 8 && query) { query = query.slice(0, -1); update(); return true; }
+      return false;
+    };
+    text.textContent = placeholder;
+    text.className = 'search-text placeholder';
+    return kb;
   }
 
   // Round channel tile (offline channels, search results). c: { login, displayName, profileImageURL, stream? }
@@ -4926,6 +5149,11 @@ TT.checkService = function () {
     if (intlBox) fill(intlBox, 'en');
   }
 
+  // Category areas like on twitch.tv, by category tag ('games' = without IRL and Creative).
+  var TAG_IRL = '2610cff9-10ae-4cb3-8500-778e6722fbb5', TAG_CREATIVE = 'e36d0169-268a-4c62-a4f4-ddf61a0b3ae4';
+  var CAT_AREAS = [['all', 'Alle', null], ['games', 'Spiele', null], ['irl', 'IRL', TAG_IRL], ['creative', 'Creative', TAG_CREATIVE]];
+  var CAT_NOT_GAMES = [TAG_IRL, TAG_CREATIVE];
+
   // ---- screens ---------------------------------------------------------------
   var views = {
     home: function () {
@@ -4988,6 +5216,13 @@ TT.checkService = function () {
         if (rec.length) {
           el.appendChild(carousel('Empfohlene', ' Live-Kanäle', rec.map(function (s) { return streamCard(s, rec); })));
         }
+        // What many live channels are about right now (events, projects), to look beyond your own channels.
+        var trendSlot = TT.el('div');
+        el.appendChild(trendSlot);
+        loadTrending().then(function (tags) {
+          if (tags.length) trendSlot.appendChild(carousel('Gerade', ' angesagt', tags.map(tagCard)));
+          TT.lazy();
+        }).catch(function () { /* optional row */ });
         var cats = TT.el('div');
         el.appendChild(cats);
         TT.api.topCategories().then(function (games) {
@@ -5180,29 +5415,179 @@ TT.checkService = function () {
     },
 
     // pick(g): choose a category for a filter instead of opening it (g = null: all categories).
-    categories: function (pick) {
+    // tag: { id, localizedName } to start with that category tag.
+    categories: function (pick, tag) {
       var el = section(pick ? 'Kategorie wählen' : 'Kategorien');
       push('categories', el);
+      var f = { area: 'all', tag: tag || null };
+      var bar = TT.el('div', 'toolbar filters');
+      var note = TT.el('div', 'view-sub filter-note');
+      var body = TT.el('div');
+      el.appendChild(bar);
+      el.appendChild(note);
+      el.appendChild(body);
+      var firstBtn = null;
       if (pick) {
-        var bar = TT.el('div', 'toolbar');
-        bar.appendChild(button('Alle Kategorien', function () { pop(); pick(null); }, 'primary'));
-        el.appendChild(bar);
+        firstBtn = button('Alle Kategorien', function () { pop(); pick(null); }, 'primary');
+        bar.appendChild(firstBtn);
       }
-      load(el, TT.api.topCategories(), function (games) {
-        el.appendChild(grid(games.map(function (g) {
-          return categoryCard(g, pick ? function () { pop(); pick(g); } : null);
-        }), 'cats'));
-        return pick ? el.querySelector('.toolbar .btn') : null;
+      var areaBtn = button('', function () {
+        var i = 0;
+        CAT_AREAS.forEach(function (x, k) { if (x[0] === f.area) i = k; });
+        f.area = CAT_AREAS[(i + 1) % CAT_AREAS.length][0];
+        paint();
+        reload();
       });
+      bar.appendChild(areaBtn);
+      if (!firstBtn) firstBtn = areaBtn;
+      var tagBtn = button('', function () {
+        views.tagPicker(popular, function (t) {
+          f.tag = t;
+          paint();
+          reload();
+        });
+      });
+      bar.appendChild(tagBtn);
+      function areaOf() { return CAT_AREAS.filter(function (x) { return x[0] === f.area; })[0]; }
+      function paint() {
+        areaBtn.textContent = 'Bereich: ' + areaOf()[1];
+        tagBtn.textContent = 'Tag: ' + (f.tag ? f.tag.localizedName : 'Alle');
+      }
+      paint();
+
+      // Tags of the categories on screen, most common first (offered in the tag picker).
+      var popular = [];
+      function countTags(games) {
+        var n = {}, byId = {};
+        games.forEach(function (g) {
+          (g.tags || []).forEach(function (t) { n[t.id] = (n[t.id] || 0) + 1; byId[t.id] = t; });
+        });
+        popular = Object.keys(n).sort(function (x, y) { return n[y] - n[x]; }).map(function (id) { return byId[id]; });
+      }
+
+      var gen = 0;
+      function reload() {
+        var my = ++gen, area = areaOf();
+        var tags = (area[2] ? [area[2]] : []).concat(f.tag ? [f.tag.id] : []);
+        var pager = TT.api.categoryPager(tags), loading = false, done = false, firstPage = true, shown = {}, all = [];
+        var g = grid([], 'cats');
+        var extraBox = TT.el('div');
+        TT.clear(body);
+        body.appendChild(g);
+        body.appendChild(extraBox);
+        note.textContent = 'Wird geladen …';
+        // "Spiele": everything that isn't IRL or Creative.
+        function fits(game) {
+          if (f.area !== 'games') return true;
+          return !(game.tags || []).some(function (t) { return CAT_NOT_GAMES.indexOf(t.id) >= 0; });
+        }
+        function add(game, box, sub) {
+          if (shown[game.name] || !fits(game)) return;
+          shown[game.name] = 1;
+          all.push(game);
+          var card = categoryCard(game, pick ? function () { pop(); pick(game); } : null, sub);
+          if (box === g) card.onfocusin2 = function () { if (all.length - all.indexOf(game) <= 12) more(); };
+          box.appendChild(card);
+        }
+        function more() {
+          if (loading || done) return;
+          loading = true;
+          pager.next().then(function (r) {
+            if (my !== gen) return;
+            loading = false;
+            done = r.done;
+            r.items.forEach(function (game) { add(game, g); });
+            countTags(all);
+            TT.lazy();
+            note.textContent = all.length ? all.length + ' Kategorien' + (done ? '' : ' (weitere laden beim Runterscrollen)') +
+              (done && !TT.api.auth.current() ? ' · Ohne Anmeldung zeigt Twitch je Auswahl höchstens 100' : '')
+              : 'Keine Kategorien für diese Auswahl';
+            if (firstPage) { firstPage = false; extras(); }
+          }, function (e) {
+            if (my !== gen) return;
+            loading = false;
+            note.textContent = 'Fehler: ' + (e.message || e);
+          });
+        }
+        // Below Twitch's list: smaller categories where channels in your language are live.
+        function extras() {
+          if (f.tag) return;
+          TT.api.langCategories().then(function (list) {
+            if (my !== gen) return;
+            var box = grid([], 'cats'), before = all.length;
+            list.forEach(function (c) {
+              if (area[2] && !(c.game.tags || []).some(function (t) { return t.id === area[2]; })) return;
+              add(c.game, box, c.channels + (c.channels === 1 ? ' Kanal' : ' Kanäle') + ' · ' + TT.fmtViewers(c.viewers));
+            });
+            if (all.length === before) return;
+            var lang = TT.store.get('lang', 'de');
+            extraBox.appendChild(heading('Weitere', lang === 'de' ? ' mit deutschen Live-Kanälen' :
+              lang === 'en' ? ' mit englischen Live-Kanälen' : ' mit Live-Kanälen'));
+            extraBox.appendChild(box);
+            countTags(all);
+            TT.lazy();
+          }).catch(function () { /* optional */ });
+        }
+        more();
+      }
+      reload();
+      TT.focus.set(firstBtn);
+    },
+
+    // Category tags: the most common of the current list, or search all of Twitch's tags.
+    tagPicker: function (popular, onPick) {
+      var el = section('Tag wählen', 'Zeigt nur Kategorien mit diesem Tag');
+      push('tagPicker', el);
+      function choose(t) { pop(); onPick(t); }
+      var bar = TT.el('div', 'toolbar filters');
+      var first = button('Alle Tags', function () { choose(null); }, 'primary');
+      bar.appendChild(first);
+      popular.slice(0, 24).forEach(function (t) { bar.appendChild(button(t.localizedName, function () { choose(t); })); });
+      el.appendChild(bar);
+      var results = TT.el('div', 'toolbar filters');
+      var timer = null, current = '';
+      typeBox(el, 'Tag suchen, z. B. horror', function (q) {
+        current = q;
+        clearTimeout(timer);
+        TT.clear(results);
+        if (q.length < 2) return;
+        timer = setTimeout(function () {
+          TT.api.searchCategoryTags(q).then(function (tags) {
+            if (q !== current) return;
+            TT.clear(results);
+            if (!tags.length) results.appendChild(TT.el('div', 'view-sub', 'Kein Tag gefunden'));
+            tags.forEach(function (t) { results.appendChild(button(t.localizedName, function () { choose(t); })); });
+          }, function (e) { results.appendChild(TT.el('div', 'view-sub', 'Fehler: ' + (e.message || e))); });
+        }, 400);
+      });
+      el.appendChild(results);
+      TT.focus.set(first);
+    },
+
+    // Live channels with a channel tag ("Gerade angesagt").
+    tag: function (name) {
+      var el = section('#' + name, 'Live-Kanäle mit diesem Tag');
+      push('tag', el);
+      load(el, TT.api.tagStreams(name), function (streams) {
+        el.appendChild(grid(streams.map(function (st) { return streamCard(st, streams); })));
+      }, 'Gerade ist niemand mit diesem Tag live');
     },
 
     category: function (g) {
       var el = section(g.displayName || g.name, g.viewersCount ? TT.fmtViewers(g.viewersCount) : '');
       push('category', el);
+      var bar = TT.el('div', 'toolbar filters');
+      el.appendChild(bar);
+      // Its tags open the categories with the same tag.
+      var tagSlot = TT.el('span');
+      bar.appendChild(tagSlot);
+      (g.tags ? Promise.resolve(g.tags) : TT.api.gameTags(g.name)).then(function (tags) {
+        tags.forEach(function (t) {
+          tagSlot.appendChild(button('Mehr ' + t.localizedName, function () { views.categories(null, t); }));
+        });
+      }).catch(function () { /* no tag buttons */ });
       // Follow / unfollow the category (signed in).
       if (TT.api.auth.current()) {
-        var bar = TT.el('div', 'toolbar');
-        el.appendChild(bar);
         TT.api.gameFollow(g.name).then(function (f) {
           var busy = false;
           var btn = button(f.following ? '♥  Folge ich' : '♡  Folgen', function () {
@@ -5216,7 +5601,7 @@ TT.checkService = function () {
               TT.toast('Hat nicht geklappt: ' + (e.message || e));
             }).then(function () { busy = false; });
           }, f.following ? '' : 'primary');
-          bar.appendChild(btn);
+          bar.insertBefore(btn, tagSlot);
         }).catch(function () { /* no button */ });
       }
       var clipsSlot = TT.el('div');
@@ -5379,26 +5764,15 @@ TT.checkService = function () {
     search: function () {
       var el = section('Suche');
       push('search', el);
-      var query = '';
-      var timer = null;
-      var input = TT.el('div', 'search-box');
-      input.appendChild(icon(NAV[5][2]));
-      var text = TT.el('span', 'search-text');
-      input.appendChild(text);
-      input.appendChild(TT.el('span', 'caret'));
-      el.appendChild(input);
-      var kb = TT.el('div', 'keyboard');
+      var query = '', timer = null;
       var results = TT.el('div', 'search-results');
-      el.appendChild(kb);
-      el.appendChild(results);
-
-      function update() {
-        text.textContent = query || 'Kanäle oder Kategorien suchen';
-        text.className = 'search-text' + (query ? '' : ' placeholder');
+      var kb = typeBox(el, 'Kanäle oder Kategorien suchen', function (q) {
+        query = q;
         clearTimeout(timer);
         if (query.length >= 2) timer = setTimeout(run, 600);
         else { TT.clear(results); if (query.length === 1) message(results, 'Noch ein Zeichen …'); }
-      }
+      });
+      el.appendChild(results);
 
       function run() {
         var q = query;
@@ -5416,31 +5790,6 @@ TT.checkService = function () {
           message(results, 'Fehler: ' + (err.message || err));
         });
       }
-
-      ['abcdefghij', 'klmnopqrst', 'uvwxyz0123', '456789_'].forEach(function (keys) {
-        var r = TT.el('div', 'keyrow');
-        keys.split('').forEach(function (ch) {
-          r.appendChild(TT.focusable(TT.el('div', 'key', ch.toUpperCase()), function () { query += ch; update(); }));
-        });
-        kb.appendChild(r);
-      });
-      var actions = TT.el('div', 'keyrow');
-      actions.appendChild(TT.focusable(TT.el('div', 'key wide', 'Leerzeichen'), function () { query += ' '; update(); }));
-      actions.appendChild(TT.focusable(TT.el('div', 'key wide', '⌫  Löschen'), function () {
-        query = query.slice(0, -1); update();
-      }));
-      actions.appendChild(TT.focusable(TT.el('div', 'key wide', 'Alles löschen'), function () {
-        query = ''; update();
-      }));
-      kb.appendChild(actions);
-
-      // Physical keyboard typing (desktop testing / USB keyboards).
-      el.typeKey = function (e) {
-        if (e.key && e.key.length === 1 && /[\w ]/.test(e.key)) { query += e.key.toLowerCase(); update(); return true; }
-        if (e.keyCode === 8 && query) { query = query.slice(0, -1); update(); return true; }
-        return false;
-      };
-      update();
       focusFirstIn(kb);
     }
   };

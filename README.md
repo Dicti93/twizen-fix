@@ -9,10 +9,16 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   der Wiedergabe in MPEG-TS umgepackt. Ohne das bleibt das Bild bei solchen Kanälen schwarz.
 - **Oberfläche auf Deutsch im Twitch-Stil:**
   - Startseite mit empfohlenem Stream und Reihen (gefolgte Live-Kanäle, Weiterschauen, „Was habe ich verpasst?“ mit
-    den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, Kategorien, ganz unten deine gefolgten
-    Kategorien); sie lädt sich neu, wenn man nach ein paar Minuten zurückkommt
+    den besten Clips der letzten 24 Stunden, zuletzt gesehen, Empfehlungen, „Gerade angesagt“, Kategorien, ganz unten
+    deine gefolgten Kategorien); sie lädt sich neu, wenn man nach ein paar Minuten zurückkommt
+  - „Gerade angesagt“: Tags, die bei deutschen Live-Kanälen gerade auffällig oft vorkommen (Events wie Stream-o-Ween,
+    Projekte wie ein Minecraft-Server). Die App merkt sich eine Woche lang, wie häufig jeder Tag ist, damit Dauerbrenner
+    verschwinden und Neues hervorsticht.
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
-    neu gestartet), die Auswahl bleibt gespeichert; 100 Kategorien mit Clips der Woche
+    neu gestartet), die Auswahl bleibt gespeichert
+  - Kategorien mit deutschen Namen und Tags (z. B. „Egoshooter · Shooter“), Bereiche (Spiele, IRL, Creative), Filter
+    nach Tag mit Tag-Suche, darunter weitere kleinere Kategorien, in denen gerade deutsche Kanäle live sind. Auf einer
+    Kategorieseite führen ihre Tags zu ähnlichen Kategorien; dazu Clips der Woche
   - TV-Programm: geplante Streams der Kanäle, denen du folgst, als Wochenübersicht
   - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch);
     ein Kanal aus der Leiste läuft neben ihr, mit ▲/▼ und OK wird durchgezappt

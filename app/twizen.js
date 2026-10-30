@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.7.5';
+TT.VERSION = '0.7.6';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -3012,7 +3012,8 @@ TT.checkService = function () {
     flag: 'M5 3h2v18H5zM8 4h11l-2 4 2 4H8z',
     fire: 'M12 2c1 4 6 6 6 12a6 6 0 01-12 0c0-3 2-5 3-6 0 2 1 3 2 3 0-4-1-6 1-9z',
     speed: 'M12 4a9 9 0 019 9h-2a7 7 0 10-14 0H3a9 9 0 019-9zm1 9l4-5-6 4a1.5 1.5 0 102 1z',
-    next: 'M5 5l9 7-9 7zM16 5h3v14h-3z'
+    next: 'M5 5l9 7-9 7zM16 5h3v14h-3z',
+    info: 'M12 2a10 10 0 110 20 10 10 0 010-20zm0 2a8 8 0 100 16 8 8 0 000-16zm-1 6h2v7h-2zm0-4h2v2h-2z'
   };
 
   // Follow state of the channel on screen: null = unknown / signed out.
@@ -3335,6 +3336,8 @@ TT.checkService = function () {
       list.push({ icon: 'user', label: 'Kanal & Videos', fn: function () { TT.player.onChannelPage(login); }, more: true });
     }
     list.push({ icon: 'comp', label: 'Kompressor: ' + TT.audio.label(), fn: cycleCompressor, more: true, stay: true });
+    // Same as the INFO key, which the Samsung smart remote's on-screen color pad doesn't pass on.
+    list.push({ icon: 'info', label: statsTimer ? 'Infos ausblenden' : 'Infos anzeigen', fn: toggleStats, more: true });
     return list;
   }
 

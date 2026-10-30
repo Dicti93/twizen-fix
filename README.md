@@ -18,7 +18,7 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
     ein Kanal aus der Leiste läuft neben ihr, mit ▲/▼ und OK wird durchgezappt
   - Kanalseiten mit Zeitplan, beliebten Clips und vergangenen Übertragungen, Suche mit Bildschirmtastatur
 - **Player:** Raids werden automatisch mitgemacht, Livestreams von Anfang an schauen, Aufzeichnung nach Streamende,
-  Qualität umschaltbar, etwa 6 s hinter live, Knopf „Neu laden“, Lautstärke-Ausgleich, Statistik auf der INFO-Taste.
+  Qualität umschaltbar, etwa 6 s hinter live, Knopf „Neu laden“, Lautstärke-Ausgleich, Statistik auf der INFO-Taste oder unter „Mehr → Infos anzeigen“.
   Titel, Kategorie und Zuschauer werden jede Minute aktualisiert. Werbepausen laufen über eine werbefreie Quelle in
   voller Qualität weiter. Die Steuerleiste ist eine Reihe mit den wichtigsten Knöpfen (Pause, Chat, Schreiben,
   Folgen; bei Videos ±1 Min., Kapitel, Hype-Moment), der Rest steckt im Menü „Mehr“.
@@ -76,7 +76,7 @@ Tag `launcher-v*` von GitHub Actions gebaut, signiert und als Release veröffent
 | Rot | | Chat: Seite / überlagert / aus |
 | Grün | | Lautstärke-Ausgleich |
 | CH ▲ / ▼ | | Stream wechseln (Videos: ± 5 Min., Clips: nächster Clip) |
-| INFO | | Statistik ein/aus |
+| INFO | | Statistik ein/aus (auch unter „Mehr → Infos anzeigen“, falls die Fernbedienung keine INFO-Taste hat) |
 
 ## Hinweise
 

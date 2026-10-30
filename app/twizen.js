@@ -3,7 +3,7 @@
 ;// Shared helpers. All app code is ES5 (no build step) so it runs on older Tizen browsers.
 var TT = window.TT = window.TT || {};
 
-TT.VERSION = '0.8.1';
+TT.VERSION = '0.8.2';
 TT.PROXY = 'http://127.0.0.1:8732';
 TT.WEB_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 TT.TV_CLIENT_ID = 'ue6666qo983tsx6so1t0vnawi233wa';
@@ -600,11 +600,28 @@ TT.checkService = function () {
         .then(function (d) { return edgesToNodes(d.games); });
     },
 
-    // The 100 biggest categories, only those with all `tags` (ids) if given. Twitch gives no
-    // further pages (not even signed in), so the categories page asks once per tag instead.
-    categoriesWithTags: function (tags) {
-      return gql('query($t:[String!]){ games(first:100, options:{sort:VIEWER_COUNT, tags:$t}){ edges{ node{ ' + GAME_FIELDS + ' } } } }',
-        { t: tags && tags.length ? tags : null }).then(function (d) { return edgesToNodes(d.games); });
+    // Categories by viewers, only those with all `tags` (ids) if given. A pager like livePager:
+    // anonymous GQL gives the first 100 only; signed in, further pages are tried.
+    categoryPager: function (tags) {
+      var cursor = null, done = false;
+      return {
+        next: function () {
+          if (done) return Promise.resolve({ items: [], done: true });
+          var first = !cursor;
+          return gql('query($c:Cursor, $t:[String!]){ games(first:100, after:$c, options:{sort:VIEWER_COUNT, tags:$t}){ ' +
+            'edges{ cursor node{ ' + GAME_FIELDS + ' } } } }', { c: cursor, t: tags && tags.length ? tags : null })
+            .then(function (d) {
+              var edges = (d.games && d.games.edges) || [];
+              cursor = edges.length >= 100 && auth.current() ? edges[edges.length - 1].cursor : null;
+              done = !cursor;
+              return { items: edgesToNodes(d.games), done: done };
+            }, function (e) {
+              if (first) throw e;
+              done = true;   // Twitch refuses further pages
+              return { items: [], done: true };
+            });
+        }
+      };
     },
 
     // Categories with live channels in the Settings language, from four differently sorted
@@ -5448,108 +5465,70 @@ TT.checkService = function () {
         popular = Object.keys(n).sort(function (x, y) { return n[y] - n[x]; }).map(function (id) { return byId[id]; });
       }
 
-      // Twitch lists at most 100 categories per request. The rest come from one request per
-      // category tag (each again the 100 biggest with that tag): about 40 requests reach over 1,500
-      // categories. They load in the background and are shown 60 at a time while scrolling.
       var gen = 0;
       function reload() {
         var my = ++gen, area = areaOf();
         var tags = (area[2] ? [area[2]] : []).concat(f.tag ? [f.tag.id] : []);
-        var shown = {}, all = [], rest = null, pool = {};
-        var langBox = TT.el('div');
+        var pager = TT.api.categoryPager(tags), loading = false, done = false, firstPage = true, shown = {}, all = [];
         var g = grid([], 'cats');
+        var extraBox = TT.el('div');
         TT.clear(body);
-        body.appendChild(langBox);
         body.appendChild(g);
+        body.appendChild(extraBox);
         note.textContent = 'Wird geladen …';
         // "Spiele": everything that isn't IRL or Creative.
         function fits(game) {
           if (f.area !== 'games') return true;
           return !(game.tags || []).some(function (t) { return CAT_NOT_GAMES.indexOf(t.id) >= 0; });
         }
-        function card(game, sub) {
-          return categoryCard(game, pick ? function () { pop(); pick(game); } : null, sub);
-        }
-        function add(game) {
+        function add(game, box, sub) {
+          if (shown[game.name] || !fits(game)) return;
           shown[game.name] = 1;
           all.push(game);
-          var c = card(game);
-          c.onfocusin2 = function () { if (all.length - all.indexOf(game) <= 14) showMore(); };
-          g.appendChild(c);
+          var card = categoryCard(game, pick ? function () { pop(); pick(game); } : null, sub);
+          if (box === g) card.onfocusin2 = function () { if (all.length - all.indexOf(game) <= 12) more(); };
+          box.appendChild(card);
         }
-        function showMore() {
-          if (!rest || !rest.length) return;
-          rest.splice(0, 60).forEach(add);
-          countTags(all);
-          TT.lazy();
-          paintNote();
-        }
-        var asked = {}, queue = [], running = 0, answered = 0;
-        function paintNote() {
-          var total = all.length + (rest ? rest.length : 0);
-          note.textContent = !total ? 'Keine Kategorien für diese Auswahl' : rest ? total + ' Kategorien' :
-            all.length + ' Kategorien, weitere werden gesucht … (' + answered + ' von ' + (answered + queue.length + running) + ' Tags)';
-        }
-        // Queues the tags of `games` that haven't been asked for yet.
-        function learn(games) {
-          games.forEach(function (game) {
-            (game.tags || []).forEach(function (t) {
-              if (!asked[t.id]) { asked[t.id] = 1; queue.push(t.id); }
-            });
+        function more() {
+          if (loading || done) return;
+          loading = true;
+          pager.next().then(function (r) {
+            if (my !== gen) return;
+            loading = false;
+            done = r.done;
+            r.items.forEach(function (game) { add(game, g); });
+            countTags(all);
+            TT.lazy();
+            note.textContent = all.length ? all.length + ' Kategorien' + (done ? '' : ' (weitere laden beim Runterscrollen)') +
+              (done && !TT.api.auth.current() ? ' · Ohne Anmeldung zeigt Twitch je Auswahl höchstens 100' : '')
+              : 'Keine Kategorien für diese Auswahl';
+            if (firstPage) { firstPage = false; extras(); }
+          }, function (e) {
+            if (my !== gen) return;
+            loading = false;
+            note.textContent = 'Fehler: ' + (e.message || e);
           });
         }
-        function pump() {
-          while (running < 3 && queue.length) {
-            running++;
-            TT.api.categoriesWithTags(tags.concat([queue.shift()])).then(null, function () { return []; }).then(function (games) {
-              running--;
-              answered++;
-              if (my !== gen) return;
-              games.forEach(function (game) { if (!shown[game.name] && fits(game)) pool[game.name] = game; });
-              learn(games);
-              if (queue.length || running) { paintNote(); pump(); return; }
-              // All found: by viewers, below the first 100 (which are the biggest anyway).
-              rest = Object.keys(pool).map(function (k) { return pool[k]; })
-                .sort(function (x, y) { return (y.viewersCount || 0) - (x.viewersCount || 0); });
-              paintNote();
-              // Short list, or the focus is already near its end: show the next ones right away.
-              var fc = TT.focus.get(), at = fc && fc.parentNode === g ? [].indexOf.call(g.children, fc) : -1;
-              if (g.children.length < 60 || (at >= 0 && g.children.length - at <= 14)) showMore();
-            });
-          }
-        }
-        TT.api.categoriesWithTags(tags).then(function (games) {
-          if (my !== gen) return;
-          games.forEach(function (game) { if (fits(game)) add(game); });
-          countTags(all);
-          TT.lazy();
-          tags.forEach(function (t) { asked[t] = 1; });
-          learn(games);
-          paintNote();
-          pump();
-          langRow();
-        }, function (e) {
-          if (my !== gen) return;
-          note.textContent = 'Fehler: ' + (e.message || e);
-        });
-        // Above the list: the categories where channels in your language are live right now.
-        function langRow() {
+        // Below Twitch's list: smaller categories where channels in your language are live.
+        function extras() {
           if (f.tag) return;
           TT.api.langCategories().then(function (list) {
             if (my !== gen) return;
-            var cards = [];
+            var box = grid([], 'cats'), before = all.length;
             list.forEach(function (c) {
               if (area[2] && !(c.game.tags || []).some(function (t) { return t.id === area[2]; })) return;
-              if (!fits(c.game)) return;
-              cards.push(card(c.game, c.channels + (c.channels === 1 ? ' Kanal' : ' Kanäle') + ' · ' + TT.fmtViewers(c.viewers)));
+              add(c.game, box, c.channels + (c.channels === 1 ? ' Kanal' : ' Kanäle') + ' · ' + TT.fmtViewers(c.viewers));
             });
-            if (!cards.length) return;
+            if (all.length === before) return;
             var lang = TT.store.get('lang', 'de');
-            langBox.appendChild(carousel('Live', lang === 'de' ? ' auf Deutsch' : lang === 'en' ? ' auf Englisch' : ' in allen Sprachen', cards));
-            langBox.appendChild(heading('Alle', ' Kategorien'));
+            extraBox.appendChild(heading('Weitere', lang === 'de' ? ' mit deutschen Live-Kanälen' :
+              lang === 'en' ? ' mit englischen Live-Kanälen' : ' mit Live-Kanälen'));
+            extraBox.appendChild(box);
+            countTags(all);
             TT.lazy();
           }).catch(function () { /* optional */ });
         }
+        more();
       }
       reload();
       TT.focus.set(firstBtn);

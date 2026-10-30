@@ -17,9 +17,8 @@ deutscher Oberfläche im Twitch-Stil. Fork von [@jjg0/twizen](https://www.npmjs.
   - Seite „Live-Kanäle“ mit Filtern (Sprache, Kategorie, Größe, 18+) und Sortierung (Empfohlen, Zuschauer ↓/↑,
     neu gestartet), die Auswahl bleibt gespeichert
   - Kategorien mit deutschen Namen und Tags (z. B. „Egoshooter · Shooter“), Bereiche (Spiele, IRL, Creative), Filter
-    nach Tag mit Tag-Suche, oben eine Reihe der Kategorien, in denen gerade deutsche Kanäle live sind. Twitch gibt pro
-    Abfrage nur 100 Kategorien heraus; die App fragt deshalb im Hintergrund einmal je Tag und kommt so auf rund 1.500
-    Kategorien. Auf einer Kategorieseite führen ihre Tags zu ähnlichen Kategorien; dazu Clips der Woche
+    nach Tag mit Tag-Suche, darunter weitere kleinere Kategorien, in denen gerade deutsche Kanäle live sind. Auf einer
+    Kategorieseite führen ihre Tags zu ähnlichen Kategorien; dazu Clips der Woche
   - TV-Programm: geplante Streams der Kanäle, denen du folgst, als Wochenübersicht
   - Seitenleiste mit Favoriten, gefolgten Kanälen und Twitchs Empfehlungen auf Deutsch und international (Englisch);
     ein Kanal aus der Leiste läuft neben ihr, mit ▲/▼ und OK wird durchgezappt
